@@ -22,7 +22,7 @@
 
 ---
 
-## Media-library reconciliation (1.19.0-rc.1)
+## Media-library reconciliation (1.19.0-rc.2)
 
 Optional integration with one Emby server prevents generated STRMs from duplicating real media. Integration is disabled by default. Configure the server URL and API key, enable integration, then use **List media libraries** to find IDs if you want to limit checks to selected libraries. The default checks all libraries. STRM-only, remote and virtual Emby entries do not count as owned; a movie with both a real file and a STRM does.
 

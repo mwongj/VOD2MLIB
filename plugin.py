@@ -1,7 +1,7 @@
 """
 VOD to Media Library — Dispatcharr VOD .strm Generator Plugin
 (slug: vod2mlib)
-v1.19.0-rc.1 — optional Emby reconciliation and persistent SQLite ownership tracking.
+v1.19.0-rc.2 — optional Emby reconciliation and persistent SQLite ownership tracking.
 
 MIT License
 Copyright (c) 2025-2026 shedunraid (original author)
@@ -34,7 +34,7 @@ class Plugin:
     """Generate .strm files for VOD movies from Dispatcharr."""
 
     name = "VOD to Media Library"
-    version = "1.19.0-rc.1"
+    version = "1.19.0-rc.2"
     help_url = "https://github.com/R3XCHRIS/VOD2MLIB#readme"
     description = (
         "Convert Dispatcharr VODs into media-server-friendly .strm files, with "
@@ -139,61 +139,7 @@ class Plugin:
         re.IGNORECASE,
     )
 
-    fields = [{'id': 'media_library_enabled',
-      'label': 'Enable media-library integration',
-      'type': 'boolean',
-      'default': False},
-     {'id': 'media_server',
-      'label': 'Media server',
-      'type': 'select',
-      'default': 'emby',
-      'options': [{'value': 'emby', 'label': 'Emby'}]},
-     {'id': 'media_server_url', 'label': 'Emby server URL', 'type': 'string', 'default': ''},
-     {'id': 'media_server_token', 'label': 'Emby API key/token', 'type': 'string', 'default': ''},
-     {'id': 'media_library_scope',
-      'label': 'Library scope',
-      'type': 'select',
-      'default': 'all',
-      'options': [{'value': 'all', 'label': 'All libraries'},
-                  {'value': 'selected', 'label': 'Selected libraries'}]},
-     {'id': 'media_library_ids',
-      'label': 'Selected library IDs',
-      'type': 'string',
-      'default': '',
-      'help_text': 'Comma-separated IDs; use List media libraries to discover IDs.'},
-     {'id': 'media_tv_mode',
-      'label': 'TV handling',
-      'type': 'select',
-      'default': 'show',
-      'options': [{'value': 'show', 'label': 'Skip entire owned show'},
-                  {'value': 'episodes', 'label': 'Fill missing episodes'}]},
-     {'id': 'media_server_failure',
-      'label': 'Server-check failure',
-      'type': 'select',
-      'default': 'continue',
-      'options': [{'value': 'continue', 'label': 'Continue with warning'},
-                  {'value': 'stop', 'label': 'Stop before file changes'}]},
-     {'id': 'media_duplicate_cleanup',
-      'label': 'Existing duplicate cleanup',
-      'type': 'select',
-      'default': 'every',
-      'options': [{'value': 'every', 'label': 'Every generation'},
-                  {'value': 'rescan', 'label': 'Full rescans only'},
-                  {'value': 'disabled', 'label': 'Disabled'}]},
-     {'id': 'm3u_cleanup_enabled', 'label': 'Clean up M3U removals', 'type': 'boolean', 'default': False},
-     {'id': 'm3u_cleanup_timing',
-      'label': 'M3U cleanup timing',
-      'type': 'select',
-      'default': 'rescan',
-      'options': [{'value': 'rescan', 'label': 'Full rescans'},
-                  {'value': 'manual', 'label': 'Manual action only'}]},
-     {'id': 'deletion_scope',
-      'label': 'Deletion scope',
-      'type': 'select',
-      'default': 'strm',
-      'options': [{'value': 'strm', 'label': 'STRMs only'},
-                  {'value': 'strm_nfo', 'label': 'STRMs and unedited generated NFOs'}]},
-     {'id': '_about',
+    fields = [{'id': '_about',
       'label': 'About',
       'type': 'info',
       'description': 'Workflow:\n'
@@ -400,7 +346,106 @@ class Plugin:
                   {'value': 'generate_movies', 'label': 'Movies only'},
                   {'value': 'generate_series', 'label': 'Series only'},
                   {'value': 'rescan_all', 'label': 'Full rescan (movies + series)'}],
-      'help_text': "Which action the scheduler should run on each tick. 'Full rescan' is recommended."}]
+      'help_text': "Which action the scheduler should run on each tick. 'Full rescan' is recommended."},
+     {'id': '_section_media_library',
+      'label': '[MEDIA LIBRARY & CLEANUP]',
+      'type': 'info',
+      'description': 'Skip content already available as real media and optionally remove generated files for '
+                     'duplicates or M3U removals.'},
+     {'id': 'media_library_enabled',
+      'label': 'Enable media-library integration',
+      'type': 'boolean',
+      'default': False,
+      'help_text': 'Check the configured media server before generation to skip content already available as '
+                   'real media. Disabled by default.'},
+     {'id': 'media_server',
+      'label': 'Media server',
+      'type': 'select',
+      'default': 'emby',
+      'options': [{'value': 'emby', 'label': 'Emby'}],
+      'help_text': 'Choose the media server to check for existing real media. This release supports one Emby '
+                   'server.'},
+     {'id': 'media_server_url',
+      'label': 'Emby server URL',
+      'type': 'string',
+      'default': '',
+      'help_text': 'URL of your Emby server as reachable from the Dispatcharr container, for example '
+                   'http://emby:8096. Include any configured base path.'},
+     {'id': 'media_server_token',
+      'label': 'Emby API key/token',
+      'type': 'string',
+      'default': '',
+      'help_text': 'Emby API key used to read libraries and media metadata. Create one in the Emby dashboard '
+                   'under API Keys.'},
+     {'id': 'media_library_scope',
+      'label': 'Library scope',
+      'type': 'select',
+      'default': 'all',
+      'options': [{'value': 'all', 'label': 'All libraries'},
+                  {'value': 'selected', 'label': 'Selected libraries'}],
+      'help_text': 'All libraries checks real media across the server. Selected libraries checks only the '
+                   'library IDs entered below. STRM-only entries do not count as owned media.'},
+     {'id': 'media_library_ids',
+      'label': 'Selected library IDs',
+      'type': 'string',
+      'default': '',
+      'help_text': 'Comma-separated library IDs, used only with Selected libraries. Run List media libraries to '
+                   'discover their names and IDs.'},
+     {'id': 'media_tv_mode',
+      'label': 'TV handling',
+      'type': 'select',
+      'default': 'show',
+      'options': [{'value': 'show', 'label': 'Skip entire owned show'},
+                  {'value': 'episodes', 'label': 'Fill missing episodes'}],
+      'help_text': 'Skip entire owned show excludes all episodes when Emby has any real episode of that show. '
+                   'Fill missing episodes excludes only season/episode positions Emby owns and revisits existing '
+                   'series folders to generate missing episodes. STRM-only episodes do not count.'},
+     {'id': 'media_server_failure',
+      'label': 'Server-check failure',
+      'type': 'select',
+      'default': 'continue',
+      'options': [{'value': 'continue', 'label': 'Continue with warning'},
+                  {'value': 'stop', 'label': 'Stop before file changes'}],
+      'help_text': 'Continue with warning generates without media-server exclusions or duplicate cleanup if the '
+                   'server check fails; enabled M3U cleanup can still run. Stop before file changes aborts the '
+                   'action before changing output files.'},
+     {'id': 'media_duplicate_cleanup',
+      'label': 'Existing duplicate cleanup',
+      'type': 'select',
+      'default': 'every',
+      'options': [{'value': 'every', 'label': 'Every generation'},
+                  {'value': 'rescan', 'label': 'Full rescans only'},
+                  {'value': 'disabled', 'label': 'Disabled'}],
+      'help_text': 'Choose when generation removes verified STRMs that duplicate real media on the server. '
+                   'Cleanup checks all tracked output, regardless of batch size. Disabled stops automatic '
+                   'deletion but still skips owned content during generation. Run selective cleanup checks '
+                   'immediately.'},
+     {'id': 'm3u_cleanup_enabled',
+      'label': 'Clean up M3U removals',
+      'type': 'boolean',
+      'default': False,
+      'help_text': 'Remove verified generated STRMs when their account/provider source is confirmed missing from '
+                   'the complete Dispatcharr catalogue, with no grace period. This ignores generation batches '
+                   'and category selections. Failed queries or episode refreshes do not establish removal. '
+                   'Disabled by default.'},
+     {'id': 'm3u_cleanup_timing',
+      'label': 'M3U cleanup timing',
+      'type': 'select',
+      'default': 'rescan',
+      'options': [{'value': 'rescan', 'label': 'Full rescans'},
+                  {'value': 'manual', 'label': 'Manual action only'}],
+      'help_text': 'When M3U cleanup is enabled, Full rescans checks removals during each Full rescan, including '
+                   'scheduled rescans. Manual action only waits for Run selective cleanup. Preview selective '
+                   'cleanup shows candidates without deleting output files.'},
+     {'id': 'deletion_scope',
+      'label': 'Deletion scope',
+      'type': 'select',
+      'default': 'strm',
+      'options': [{'value': 'strm', 'label': 'STRMs only'},
+                  {'value': 'strm_nfo', 'label': 'STRMs and unedited generated NFOs'}],
+      'help_text': 'STRMs only preserves all NFO metadata. STRMs and unedited generated NFOs also removes NFOs '
+                   'whose recorded generated hashes still match. Edited or unverified files, artwork and '
+                   'subtitles are preserved. Applies to automatic, selective and Movies/Series cleanup actions.'}]
 
     actions = [{'id': 'list_media_libraries',
       'label': 'List media libraries',
