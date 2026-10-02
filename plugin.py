@@ -14,8 +14,14 @@ This fork:  https://github.com/R3XCHRIS/VOD2MLIB
 """
 import os
 import re
+from enum import Enum
 from typing import Dict, Any
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
+
+class VODType(Enum):
+    MOVIE = "movie"
+    SERIES = "series"
 
 
 class Plugin:
@@ -478,6 +484,23 @@ class Plugin:
 
         return {"status": "error", "message": f"Unknown action: {action}"}
     
+    def _eligible_vod_relations(self, query, vod_type: VODType):
+        """Require an active account and its enabled category for this VOD type.
+
+        Match the category relation to the content relation's account so an
+        enabled category on another account cannot admit disabled content.
+        Match the type so identically named movie and series categories remain
+        independent.
+        """
+        from django.db.models import F
+
+        return query.filter(
+            m3u_account__is_active=True,
+            category__category_type=vod_type.value,
+            category__m3u_relations__enabled=True,
+            category__m3u_relations__m3u_account_id=F("m3u_account_id"),
+        )
+
     def _scan_all_vods(self, settings: Dict[str, Any], logger):
         """Scan and show total movies and series available."""
         logger.info("Scanning VODs in Dispatcharr...")
@@ -491,35 +514,30 @@ class Plugin:
             return {"status": "error", "message": f"Import error: {e}"}
 
         try:
-            # Counts are filtered to content that has at least one relation on an
-            # ACTIVE M3U account — same definition Dispatcharr's own VODs UI and
-            # the proxy use. Generate only writes active content, so the scan
-            # totals now match what will actually be produced. Orphaned content
-            # (no active provider) is surfaced separately so the gap is visible.
-            active_movie = (
-                Movie.objects
-                .filter(m3u_relations__m3u_account__is_active=True)
-                .distinct().count()
+            # Reuse generator eligibility for unique content, relation totals,
+            # and categories. Content without an eligible provider is orphaned.
+            eligible_movies = self._eligible_vod_relations(
+                M3UMovieRelation.objects.all(), VODType.MOVIE,
             )
-            active_series = (
-                Series.objects
-                .filter(m3u_relations__m3u_account__is_active=True)
-                .distinct().count()
+            eligible_series = self._eligible_vod_relations(
+                M3USeriesRelation.objects.all(), VODType.SERIES,
             )
+            active_movie = eligible_movies.values("movie_id").distinct().count()
+            active_series = eligible_series.values("series_id").distinct().count()
             total_movie = Movie.objects.count()
             total_series = Series.objects.count()
             orphan_movie = total_movie - active_movie
             orphan_series = total_series - active_series
-            movie_relations = M3UMovieRelation.objects.filter(m3u_account__is_active=True).count()
-            series_relations = M3USeriesRelation.objects.filter(m3u_account__is_active=True).count()
+            movie_relations = eligible_movies.count()
+            series_relations = eligible_series.count()
 
             logger.info("=" * 60)
             logger.info("MOVIES: %d active  (%d M3U relations)", active_movie, movie_relations)
             if orphan_movie:
-                logger.info("        %d orphaned — no active provider (won't generate)", orphan_movie)
+                logger.info("        %d orphaned — no active provider with an enabled category (won't generate)", orphan_movie)
             logger.info("SERIES: %d active  (%d M3U relations)", active_series, series_relations)
             if orphan_series:
-                logger.info("        %d orphaned — no active provider (won't generate)", orphan_series)
+                logger.info("        %d orphaned — no active provider with an enabled category (won't generate)", orphan_series)
             logger.info("=" * 60)
 
             # Category breakdown — the exact names to type into Category Filter
@@ -529,9 +547,8 @@ class Plugin:
             cat_filter_prefixes = self._parse_category_filter(settings.get("category_filter"))
             cat_exclude_prefixes = self._parse_category_filter(settings.get("category_exclude"))
             counts = {}
-            for model, idx in ((M3UMovieRelation, 0), (M3USeriesRelation, 1)):
-                for row in (model.objects
-                            .filter(m3u_account__is_active=True)
+            for query, idx in ((eligible_movies, 0), (eligible_series, 1)):
+                for row in (query
                             .values("category__name")
                             .annotate(n=Count("id"))):
                     entry = counts.setdefault(row["category__name"], [0, 0])
@@ -575,7 +592,7 @@ class Plugin:
 
             message = f"Found {active_movie} movies and {active_series} series"
             if orphan_movie or orphan_series:
-                message += f" ({orphan_movie + orphan_series} orphaned — no active provider)"
+                message += f" ({orphan_movie + orphan_series} orphaned — no active provider with an enabled category)"
 
             return {
                 "status": "ok",
@@ -819,13 +836,11 @@ class Plugin:
             return {"status": "error", "message": f"Import error: {e}"}
 
         try:
-            # Only generate for relations on an ACTIVE M3U account — content
-            # whose provider was deactivated upstream must not produce .strm
-            # files (they'd point at a dead provider). Matches the scan totals.
-            query = (
+            # Apply shared account/category eligibility before user filters.
+            query = self._eligible_vod_relations(
                 M3UMovieRelation.objects
-                .select_related('movie', 'm3u_account', 'category')
-                .filter(m3u_account__is_active=True)
+                .select_related('movie', 'm3u_account', 'category'),
+                VODType.MOVIE,
             )
             query = self._apply_category_filter(query, category_filter)
             query = self._apply_category_exclude(query, category_exclude)
@@ -1085,12 +1100,11 @@ class Plugin:
             return {"status": "error", "message": f"Import error: {e}"}
 
         try:
-            # Active-account filter — see _generate_movies. Deactivated providers
-            # must not produce episode .strm files.
-            query = (
+            # Apply shared account/category eligibility before user filters.
+            query = self._eligible_vod_relations(
                 M3USeriesRelation.objects
-                .select_related('series', 'm3u_account', 'category')
-                .filter(m3u_account__is_active=True)
+                .select_related('series', 'm3u_account', 'category'),
+                VODType.SERIES,
             )
             query = self._apply_category_filter(query, category_filter)
             query = self._apply_category_exclude(query, category_exclude)
