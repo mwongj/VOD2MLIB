@@ -38,7 +38,10 @@ class Query:
     def values_list(self, *fields):
         def resolve(row, field):
             for part in field.split("__"):
-                row = getattr(row, part)
+                if part.endswith("_id") and not hasattr(row, part):
+                    row = getattr(row, part[:-3]).id
+                else:
+                    row = getattr(row, part)
             return row
         return Query([tuple(resolve(row, field) for field in fields) for row in self.rows])
 
@@ -781,9 +784,9 @@ def test_m3u_reuses_complete_census_when_no_provider_refresh(library, monkeypatc
     passes = []
     census = Reconciliation.census
 
-    def counted(self):
+    def counted(self, **kwargs):
         passes.append(True)
-        return census(self)
+        return census(self, **kwargs)
 
     monkeypatch.setattr(Reconciliation, "census", counted)
     library.rows["movies"].clear()
@@ -1161,6 +1164,7 @@ def test_timing_metrics_account_for_batches_and_failed_phases(library, monkeypat
 
 
 def test_action_telemetry_survives_status_result_and_logs_no_settings(library, caplog):
+    Path(library.settings["root_folder"]).mkdir()
     library.rows["movies"].append(relation(media(1)))
     with caplog.at_level(logging.INFO):
         result = library.run(media_library_enabled=True, media_server_token="private-key")
@@ -1326,3 +1330,95 @@ def test_failed_forced_discovery_invalidates_marker_and_retries(library, monkeyp
     assert result["reconciliation"]["discovery_scanned_roots"] == 1
     assert result["reconciliation"]["adopted"] == 1
     assert second.exists()
+
+
+
+def test_lean_and_metadata_census_agree_on_sources_without_identity_work(library, monkeypatch):
+    from reconciliation import source_for
+    show = media(10)
+    library.rows["series"].append(relation(show, "series"))
+    a, b = relation(media(1)), relation(media(2))
+    b.m3u_account_id = 2
+    ep = relation(media(3, series=show, season_number=0, episode_number=1), "episode")
+    orphan = relation(media(4, series=show, season_number=1, episode_number=2), "episode")
+    orphan.m3u_account_id = 2
+    library.rows["movies"].extend([a, b, a])  # Duplicate source across catalogue rows.
+    library.rows["episodes"].extend([ep, orphan])
+    rich = Reconciliation(library.p, library.settings, LOG, library.tmp / "rich")
+    lean = Reconciliation(library.p, library.settings, LOG, library.tmp / "lean")
+    try:
+        rich.census()
+        expected = {r[0] for r in rich.store.db.execute("SELECT source FROM live")}
+        monkeypatch.setattr(library.p, "_extract_clean_name_and_year",
+                            lambda *_: pytest.fail("Lean census cleaned metadata"))
+        lean.census(metadata=False)
+        assert {r[0] for r in lean.store.db.execute("SELECT source FROM live")} == expected
+        assert source_for(orphan, "episode") not in expected
+        assert lean.store.db.execute("SELECT COUNT(*) FROM catalogue").fetchone()[0] == 0
+        assert "catalogue_index_build" not in lean.report["timings"]
+        assert lean.census_count == rich.census_count == 4
+    finally:
+        rich.store.close(); lean.store.close()
+
+
+def test_routine_checks_skip_census_without_m3u_or_pending_discovery(library, monkeypatch):
+    library.rows["movies"].append(relation(media(1)))
+    write_external_strm(library, media(1))
+    library.run("preview_cleanup")
+    monkeypatch.setattr(Reconciliation, "census", lambda *_args, **_kw: pytest.fail("Unneeded census"))
+    result = library.run("preview_cleanup", media_library_enabled=True)
+    assert result["status"] == "ok"
+    assert result["reconciliation"]["catalogue_modes"] == []
+    assert "catalogue" not in result["reconciliation"]["timings"]
+
+
+def test_routine_m3u_uses_sources_and_rebuild_uses_metadata(library):
+    obj = media(1); library.rows["movies"].append(relation(obj))
+    write_external_strm(library, obj)
+    assert library.run("preview_cleanup")["reconciliation"]["catalogue_modes"] == ["metadata"]
+    result = library.run("preview_cleanup", m3u_cleanup_enabled=True)
+    assert result["reconciliation"]["catalogue_modes"] == ["sources"]
+    assert library.run("rebuild_inventory")["reconciliation"]["catalogue_modes"] == ["metadata"]
+
+
+def test_failed_lean_query_never_establishes_m3u_absence(library, monkeypatch):
+    obj = media(1); library.rows["movies"].append(relation(obj))
+    strm = write_external_strm(library, obj)
+    library.run("preview_cleanup")
+    iterator = Query.iterator
+    def fail(self, **kwargs):
+        yield from iterator(self, **kwargs)
+        raise RuntimeError("Incomplete catalogue")
+    monkeypatch.setattr(Query, "iterator", fail)
+    result = library.run("selective_cleanup", m3u_cleanup_enabled=True)
+    assert result["reconciliation"]["deleted"] == 0
+    assert result["reconciliation"]["warnings"] and strm.exists()
+
+
+def test_after_episode_refresh_census_uses_sources_only(library, monkeypatch):
+    show = media(10)
+    library.rows["series"].append(relation(show, "series"))
+    library.rows["episodes"].append(
+        relation(media(1, series=show, season_number=1, episode_number=1), "episode")
+    )
+    library.run("generate_series")
+    monkeypatch.setattr(Reconciliation, "refresh_complete", lambda *_: None)
+    result = library.run("preview_cleanup", m3u_cleanup_enabled=True)
+    assert result["reconciliation"]["catalogue_modes"] == ["metadata", "sources"]
+
+
+def test_forced_discovery_invalidates_marker_when_root_stat_fails(library, monkeypatch):
+    obj = media(1); library.rows["movies"].append(relation(obj))
+    write_external_strm(library, obj); library.run("preview_cleanup")
+    root = library.settings["root_folder"]
+    stat = os.stat
+    with monkeypatch.context() as patch:
+        def failed(path, *args, **kwargs):
+            if os.fspath(path) == root:
+                raise PermissionError("Root unavailable")
+            return stat(path, *args, **kwargs)
+        patch.setattr("reconciliation.os.stat", failed)
+        assert library.run("rebuild_inventory")["status"] == "error"
+    result = library.run("preview_cleanup")
+    assert result["reconciliation"]["discovery_scanned_roots"] == 1
+    assert result["reconciliation"]["catalogue_modes"] == ["metadata"]

@@ -88,6 +88,7 @@ class Reconciliation:
             "timings": {},
             "worker_pid": os.getpid(),
             "adopted": 0,
+            "catalogue_modes": [],
             "discovery_scanned_roots": 0,
             "discovery_skipped_roots": 0,
         }
@@ -213,10 +214,12 @@ class Reconciliation:
         )
         # Refresh failures must never establish episode absence.
         try:
-            with self.measure("catalogue"):
-                self.census()
+            roots = self.discovery_roots()
+            if roots or m3u:
+                with self.measure("catalogue"):
+                    self.census(metadata=bool(roots))
             with self.measure("legacy_adoption"):
-                self.adopt()
+                self.adopt(roots=roots)
             refreshed = False
             if m3u:
                 with self.measure("m3u_tracked_show_check"):
@@ -225,7 +228,7 @@ class Reconciliation:
                 for table in ("live", "live_series", "catalogue"):
                     self.store.db.execute(f"DELETE FROM {table}")
                 with self.measure("catalogue"):
-                    self.census()
+                    self.census(metadata=False)
             self.m3u_complete = m3u
         except Exception as error:
             self.m3u_complete = False
@@ -241,7 +244,10 @@ class Reconciliation:
         with self.measure("cleanup"):
             self.cleanup(server, self.m3u_complete, action == "preview_cleanup")
 
-    def census(self):
+    def census(self, metadata=True):
+        self.report["catalogue_modes"].append("metadata" if metadata else "sources")
+        if not metadata:
+            return self.source_census()
         from apps.vod.models import (
             M3UEpisodeRelation,
             M3UMovieRelation,
@@ -274,7 +280,7 @@ class Reconciliation:
         @lru_cache(maxsize=8192)
         def live_show(uuid, account):
             return bool(self.store.db.execute(
-                "SELECT 1 FROM live_series WHERE uuid=? AND account=?",
+                "SELECT 1 FROM live_series WHERE series_key=? AND account=?",
                 (uuid, account),
             ).fetchone())
 
@@ -326,6 +332,73 @@ class Reconciliation:
         with self.measure("catalogue_index_build"), self.store.db:
             self.store.db.execute("CREATE INDEX temp.catalogue_uuid ON catalogue(uuid,stream)")
         self.progress(f"Checked Dispatcharr catalogue: {self.census_count:,} rows")
+
+    def source_census(self):
+        from apps.vod.models import (
+            M3UEpisodeRelation,
+            M3UMovieRelation,
+            M3USeriesRelation,
+        )
+
+        self.progress("Checking complete Dispatcharr source catalogue")
+        self.census_count = 0
+        # Direct foreign keys avoid joins to full media records. Both sides use
+        # the same Series primary key, rather than fetching its display UUID.
+        batch = []
+        for account, series in self.catalogue_rows(
+            M3USeriesRelation.objects.values_list("m3u_account_id", "series_id"),
+            "catalogue_series_read",
+        ):
+            batch.append((str(series), str(account)))
+            if len(batch) == BATCH_SIZE:
+                self._source_batch(batch, series=True)
+                batch = []
+        if batch:
+            self._source_batch(batch, series=True)
+
+        @lru_cache(maxsize=8192)
+        def live_show(series, account):
+            return bool(self.store.db.execute(
+                "SELECT 1 FROM live_series WHERE series_key=? AND account=?",
+                (str(series), str(account)),
+            ).fetchone())
+
+        for model, kind in ((M3UMovieRelation, "movie"), (M3UEpisodeRelation, "episode")):
+            fields = ["m3u_account_id", "stream_id"]
+            if kind == "episode":
+                fields.append("episode__series_id")
+            batch = []
+            for row in self.catalogue_rows(
+                model.objects.values_list(*fields), f"catalogue_{kind}_read",
+            ):
+                account, stream = row[:2]
+                if kind == "episode" and not live_show(row[2], account):
+                    continue
+                source = (json.dumps([kind, str(account), str(stream)])
+                          if account is not None and stream is not None else "")
+                batch.append((source,))
+                if len(batch) == BATCH_SIZE:
+                    self._source_batch(batch)
+                    batch = []
+            if batch:
+                self._source_batch(batch)
+        self.progress(f"Checked complete Dispatcharr sources: {self.census_count:,} rows")
+
+    def _source_batch(self, batch, series=False):
+        with self.measure("catalogue_sqlite_write", len(batch)), self.store.db:
+            if series:
+                self.store.db.executemany(
+                    "INSERT OR IGNORE INTO live_series VALUES (?,?)", batch,
+                )
+            else:
+                self.store.db.executemany(
+                    "INSERT OR IGNORE INTO live VALUES (?)", [row for row in batch if row[0]],
+                )
+        if not series:
+            previous = self.census_count
+            self.census_count += len(batch)
+            if self.census_count // 10000 > previous // 10000:
+                self.progress(f"Checking Dispatcharr sources: {self.census_count:,} rows processed")
 
     def refresh_tracked_series(self):
         if not self.store.db.execute(
@@ -507,24 +580,34 @@ class Reconciliation:
                 raise
             return
 
-    def adopt(self, force=False):
-        self.progress("Adopting recognizable generated output")
+    def discovery_roots(self, force=False):
         host = urlparse(self.settings.get("dispatcharr_url", ""))
         context = json.dumps([host.scheme, host.netloc])
+        roots = []
         for root in dict.fromkeys(self.roots):
             root_key = os.path.normcase(os.path.realpath(root))
+            if force:
+                self.store.invalidate_discovery(root_key)
             if not force and self.store.discovery_complete(root_key, context):
                 self.report["discovery_skipped_roots"] += 1
                 continue
-            # Invalidate before scanning, including forced scans: failures retry.
-            self.store.invalidate_discovery(root_key)
             try:
                 root_stat = os.stat(root)
             except FileNotFoundError:
-                # Do not mark a missing root; discover it if it appears later.
                 continue
             if not stat.S_ISDIR(root_stat.st_mode):
                 raise ValueError("An output root is not a directory")
+            roots.append((root, root_key, context))
+        return roots
+
+    def adopt(self, force=False, roots=None):
+        self.progress("Adopting recognizable generated output")
+        host = urlparse(self.settings.get("dispatcharr_url", ""))
+        if roots is None:
+            roots = self.discovery_roots(force)
+        for root, root_key, context in roots:
+            # Invalidate before scanning, including forced scans: failures retry.
+            self.store.invalidate_discovery(root_key)
             records, incomplete = [], False
             self.report["discovery_scanned_roots"] += 1
             for discovered in self.generated_paths(root, missing_ok=False):

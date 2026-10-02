@@ -121,7 +121,7 @@ class InventoryStore:
             """)
         self.db.execute("CREATE TEMP TABLE live(source TEXT PRIMARY KEY)")
         self.db.execute(
-            "CREATE TEMP TABLE live_series(uuid TEXT, account TEXT, PRIMARY KEY(uuid,account))"
+            "CREATE TEMP TABLE live_series(series_key TEXT, account TEXT, PRIMARY KEY(series_key,account))"
         )
         self.db.execute(
             "CREATE TEMP TABLE catalogue(uuid TEXT, stream TEXT, identity TEXT, source TEXT, season INTEGER, episode INTEGER)"
