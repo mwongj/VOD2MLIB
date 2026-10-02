@@ -91,6 +91,18 @@ def status(directory=None):
         job["message"] = (
             f"{progress}; elapsed {elapsed} min, deadline in {remaining} min"
         )
+    timings = job.get("result", {}).get("reconciliation", {}).get("timings", {})
+    if timings:
+        names = {
+            "total": "total", "emby_snapshot": "Emby", "catalogue": "catalogue",
+            "legacy_adoption": "discovery", "m3u_tracked_show_check": "M3U check",
+            "cleanup": "cleanup", "generate_movies": "movies", "generate_series": "series",
+        }
+        summary = ", ".join(
+            f"{label} {timings[name]['wall_seconds']:.1f}s"
+            for name, label in names.items() if name in timings
+        )
+        job["message"] = job.get("message", job["state"]) + "; timing: " + summary
     return {"status": "ok", "message": job.get("message", job["state"]), "job": job}
 
 

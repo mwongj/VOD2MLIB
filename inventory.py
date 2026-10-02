@@ -92,6 +92,9 @@ class InventoryStore:
         self.db_path = str(Path(directory) / "inventory.sqlite3")
         self.db = sqlite3.connect(self.db_path, timeout=10)
         self.db.row_factory = sqlite3.Row
+        # Bound the temporary census B-tree cache to 32 MiB. Keep temporary
+        # tables on disk and leave persistent inventory durability unchanged.
+        self.db.execute("PRAGMA temp.cache_size=-32768")
         version = self.db.execute("PRAGMA user_version").fetchone()[0]
         if version not in (0, 1):
             self.db.close()

@@ -5,8 +5,11 @@ import os
 import re
 import sqlite3
 import threading
+import time
+from contextlib import contextmanager
 from dataclasses import asdict
 from functools import lru_cache
+from itertools import islice
 from pathlib import Path
 from queue import Empty, Full, Queue
 from urllib.parse import parse_qs, urlparse
@@ -64,6 +67,7 @@ def source_for(rel, kind):
 
 class Reconciliation:
     def __init__(self, plugin, settings, logger, directory):
+        self.started_wall, self.started_cpu = time.perf_counter(), time.process_time()
         self.plugin, self.settings, self.logger = plugin, settings, logger
         self.store = InventoryStore(directory)
         self.snapshot = None
@@ -80,12 +84,74 @@ class Reconciliation:
             "missing": 0,
             "errors": 0,
             "warnings": [],
+            "timings": {},
+            "worker_pid": os.getpid(),
         }
         self.roots = [
             settings.get("root_folder", "/VODS/Movies"),
             settings.get("series_root_folder", "/VODS/Series"),
         ]
         self.m3u_complete = False
+
+    @contextmanager
+    def measure(self, name, items=0):
+        wall, cpu = time.perf_counter(), time.process_time()
+        try:
+            yield
+        finally:
+            with self.counter_lock:
+                timing = self.report["timings"].setdefault(name, {
+                    "wall_seconds": 0.0, "cpu_seconds": 0.0, "calls": 0, "items": 0,
+                })
+                timing["wall_seconds"] += time.perf_counter() - wall
+                timing["cpu_seconds"] += time.process_time() - cpu
+                timing["calls"] += 1
+                timing["items"] += items
+
+    def finish(self):
+        timings = self.report["timings"]
+        if "catalogue" in timings:
+            children = [value for name, value in timings.items()
+                        if name.startswith("catalogue_")]
+            timings["catalogue_processing"] = {
+                key: max(0.0, timings["catalogue"][key] - sum(t[key] for t in children))
+                for key in ("wall_seconds", "cpu_seconds")
+            }
+        self.report["timings"]["total"] = {
+            "wall_seconds": time.perf_counter() - self.started_wall,
+            "cpu_seconds": time.process_time() - self.started_cpu,
+            "calls": 1,
+        }
+        for timing in self.report["timings"].values():
+            for key in ("wall_seconds", "cpu_seconds"):
+                timing[key] = round(timing[key], 4)
+        telemetry = {
+            "worker_pid": self.report["worker_pid"], "timings": self.report["timings"],
+            "recorded_at_unix": time.time(),
+        }
+        self.logger.info("VOD2MLIB timing summary: %s", json.dumps(telemetry, sort_keys=True))
+        # Supervised workers have detached stdout. Keep the latest metrics in
+        # persistent plugin state as well as the completed action result.
+        path = Path(self.store.db_path).parent / "timings.json"
+        temporary = path.with_suffix(".tmp")
+        try:
+            fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w", encoding="utf8") as output:
+                json.dump(telemetry, output)
+            os.replace(temporary, path)
+        except OSError:
+            self.warning("Could not save the timing report; action results still include timings")
+
+    def catalogue_rows(self, query, name):
+        iterator = query.iterator(chunk_size=BATCH_SIZE)
+        while True:
+            # Time batches rather than every row; includes cursor fetch/decoding.
+            with self.measure(name):
+                rows = list(islice(iterator, BATCH_SIZE))
+            if not rows:
+                break
+            self.report["timings"][name]["items"] += len(rows)
+            yield from rows
 
     def progress(self, message):
         callback = getattr(self.plugin, "_progress", None)
@@ -112,11 +178,10 @@ class Reconciliation:
                 self.progress("Fetching Emby snapshot")
                 adapter = create_adapter(self.settings)
                 adapter.progress = self.progress
-                libraries = resolve_library_ids(adapter.list_libraries(), libraries)
-                self.snapshot = adapter.get_snapshot(
-                    libraries,
-                    ["movie", "series"],
-                )
+                with self.measure("emby_library_listing"):
+                    libraries = resolve_library_ids(adapter.list_libraries(), libraries)
+                with self.measure("emby_snapshot"):
+                    self.snapshot = adapter.get_snapshot(libraries, ["movie", "series"])
                 self.snapshot.clean_title = lambda title: (
                     self.plugin._extract_clean_name_and_year(title)[0]
                 )
@@ -136,12 +201,19 @@ class Reconciliation:
         )
         # Refresh failures must never establish episode absence.
         try:
-            self.census()
-            self.adopt()
-            if m3u and self.refresh_tracked_series():
+            with self.measure("catalogue"):
+                self.census()
+            with self.measure("legacy_adoption"):
+                self.adopt()
+            refreshed = False
+            if m3u:
+                with self.measure("m3u_tracked_show_check"):
+                    refreshed = self.refresh_tracked_series()
+            if refreshed:
                 for table in ("live", "live_series", "catalogue"):
                     self.store.db.execute(f"DELETE FROM {table}")
-                self.census()
+                with self.measure("catalogue"):
+                    self.census()
             self.m3u_complete = m3u
         except Exception as error:
             self.m3u_complete = False
@@ -154,7 +226,8 @@ class Reconciliation:
             or action in ("generate_movies", "generate_series", "rescan_all")
             and (timing == "every" or timing == "rescan" and action == "rescan_all")
         )
-        self.cleanup(server, self.m3u_complete, action == "preview_cleanup")
+        with self.measure("cleanup"):
+            self.cleanup(server, self.m3u_complete, action == "preview_cleanup")
 
     def census(self):
         from apps.vod.models import (
@@ -165,20 +238,23 @@ class Reconciliation:
 
         self.progress("Checking complete Dispatcharr catalogue")
         self.census_count = 0
+        # No catalogue lookups happen while loading: sort/build this index once
+        # after the complete census instead of updating it for every insert.
+        self.store.db.execute("DROP INDEX IF EXISTS temp.catalogue_uuid")
         series_batch = []
-        for account, uuid in (
-            M3USeriesRelation.objects.values_list("m3u_account_id", "series__uuid")
-            .iterator(chunk_size=BATCH_SIZE)
+        for account, uuid in self.catalogue_rows(
+            M3USeriesRelation.objects.values_list("m3u_account_id", "series__uuid"),
+            "catalogue_series_read",
         ):
             series_batch.append((str(uuid), str(account)))
             if len(series_batch) == BATCH_SIZE:
-                with self.store.db:
+                with self.measure("catalogue_sqlite_write", len(series_batch)), self.store.db:
                     self.store.db.executemany(
                         "INSERT OR IGNORE INTO live_series VALUES (?,?)", series_batch
                     )
                 series_batch = []
         if series_batch:
-            with self.store.db:
+            with self.measure("catalogue_sqlite_write", len(series_batch)), self.store.db:
                 self.store.db.executemany(
                     "INSERT OR IGNORE INTO live_series VALUES (?,?)", series_batch
                 )
@@ -214,7 +290,9 @@ class Reconciliation:
                     "episode__series__uuid", "episode__season_number",
                     "episode__episode_number",
                 ])
-            for row in model.objects.values_list(*fields).iterator(chunk_size=BATCH_SIZE):
+            for row in self.catalogue_rows(
+                model.objects.values_list(*fields), f"catalogue_{attr}_read",
+            ):
                 account, stream, uuid, name, year, tmdb, imdb = row[:7]
                 account = str(account)
                 if attr == "episode" and not live_show(str(row[7]), account):
@@ -233,9 +311,16 @@ class Reconciliation:
                     batch = []
         if batch:
             self._census_batch(batch)
+        with self.measure("catalogue_index_build"), self.store.db:
+            self.store.db.execute("CREATE INDEX temp.catalogue_uuid ON catalogue(uuid,stream)")
         self.progress(f"Checked Dispatcharr catalogue: {self.census_count:,} rows")
 
     def refresh_tracked_series(self):
+        if not self.store.db.execute(
+            "SELECT 1 FROM files WHERE kind='series' LIMIT 1"
+        ).fetchone():
+            self.progress("No tracked shows require M3U episode refresh")
+            return False
         from apps.vod.models import M3USeriesRelation
         from apps.vod.tasks import refresh_series_episodes
 
@@ -262,7 +347,8 @@ class Reconciliation:
                 and self.snapshot.owns(identity)
             )
             if self.tracked_series(identity) and not owned_show:
-                self.refresh_complete(rel, refresh_series_episodes)
+                with self.measure("provider_episode_refresh", 1):
+                    self.refresh_complete(rel, refresh_series_episodes)
                 refreshed = True
         return refreshed
 
@@ -382,7 +468,7 @@ class Reconciliation:
             self.progress(
                 f"Checking Dispatcharr catalogue: {self.census_count:,} rows processed"
             )
-        with self.store.db:
+        with self.measure("catalogue_sqlite_write", len(batch)), self.store.db:
             self.store.db.executemany(
                 "INSERT INTO catalogue VALUES (?,?,?,?,?,?)", batch
             )
@@ -391,69 +477,79 @@ class Reconciliation:
                 [(r[3],) for r in batch if r[3]],
             )
 
+    @staticmethod
+    def generated_paths(root):
+        # DirEntry uses the directory listing's type information. os.walk plus
+        # path-based islink checks used multiple network filesystem stats per dir.
+        try:
+            with os.scandir(root) as entries:
+                for entry in entries:
+                    if entry.is_symlink():
+                        continue
+                    if entry.is_dir(follow_symlinks=False):
+                        yield from Reconciliation.generated_paths(entry.path)
+                    elif entry.name.endswith(".strm"):
+                        yield entry.path
+        except FileNotFoundError:
+            return
+
     def adopt(self):
         self.progress("Adopting recognizable generated output")
         host = urlparse(self.settings.get("dispatcharr_url", ""))
         records = []
         for root in self.roots:
-            for folder, dirs, files in os.walk(root):
-                dirs[:] = [
-                    d for d in dirs if not os.path.islink(os.path.join(folder, d))
-                ]
-                for name in files:
-                    if not name.endswith(".strm"):
+            for discovered in self.generated_paths(root):
+                path = os.path.abspath(discovered)
+                if self.store.db.execute(
+                    "SELECT 1 FROM files WHERE path=?", (path,)
+                ).fetchone():
+                    continue
+                if not contained(path, self.roots) or os.path.islink(path):
+                    continue
+                try:
+                    if os.path.getsize(path) > 8192:
                         continue
-                    path = os.path.abspath(os.path.join(folder, name))
-                    if self.store.db.execute(
-                        "SELECT 1 FROM files WHERE path=?", (path,)
-                    ).fetchone():
-                        continue
-                    if not contained(path, self.roots) or os.path.islink(path):
-                        continue
-                    try:
-                        if os.path.getsize(path) > 8192:
-                            continue
-                        parsed = urlparse(
-                            Path(path).read_text(encoding="utf-8").strip()
-                        )
-                        match = re.fullmatch(
-                            r"/proxy/vod/(movie|episode)/([^/]+)", parsed.path
-                        )
-                        if not match or (parsed.scheme, parsed.netloc) != (
-                            host.scheme,
-                            host.netloc,
-                        ):
-                            self.report["preserved"] += 1
-                            continue
-                        stream = parse_qs(parsed.query).get("stream_id", [None])[0]
-                        sql = "SELECT * FROM catalogue WHERE uuid=?"
-                        args = [match[2]]
-                        if stream is not None:
-                            sql += " AND stream=?"
-                            args.append(stream)
-                        rows = self.store.db.execute(sql, args).fetchall()
-                        identities = {r["identity"] for r in rows}
-                        if len(identities) != 1:
-                            self.report["preserved"] += 1
-                            continue
-                        for row in rows:
-                            records.append(
-                                (
-                                    path,
-                                    Identity(**json.loads(row["identity"])),
-                                    row["source"],
-                                    (row["season"], row["episode"])
-                                    if match[1] == "episode"
-                                    else None,
-                                    None,
-                                )
-                            )
-                            if len(records) == BATCH_SIZE:
-                                self.store.record_many(records)
-                                records = []
-                        # Legacy NFOs have no recorded generated hash: preserve them.
-                    except (OSError, UnicodeError, ValueError):
+                    parsed = urlparse(
+                        Path(path).read_text(encoding="utf-8").strip()
+                    )
+                    match = re.fullmatch(
+                        r"/proxy/vod/(movie|episode)/([^/]+)", parsed.path
+                    )
+                    if not match or (parsed.scheme, parsed.netloc) != (
+                        host.scheme,
+                        host.netloc,
+                    ):
                         self.report["preserved"] += 1
+                        continue
+                    stream = parse_qs(parsed.query).get("stream_id", [None])[0]
+                    sql = "SELECT * FROM catalogue WHERE uuid=?"
+                    args = [match[2]]
+                    if stream is not None:
+                        sql += " AND stream=?"
+                        args.append(stream)
+                    rows = self.store.db.execute(sql, args).fetchall()
+                    identities = {r["identity"] for r in rows}
+                    if len(identities) != 1:
+                        self.report["preserved"] += 1
+                        continue
+                    for row in rows:
+                        records.append(
+                            (
+                                path,
+                                Identity(**json.loads(row["identity"])),
+                                row["source"],
+                                (row["season"], row["episode"])
+                                if match[1] == "episode"
+                                else None,
+                                None,
+                            )
+                        )
+                        if len(records) == BATCH_SIZE:
+                            self.store.record_many(records)
+                            records = []
+                    # Legacy NFOs have no recorded generated hash: preserve them.
+                except (OSError, UnicodeError, ValueError):
+                    self.report["preserved"] += 1
 
         if records:
             self.store.record_many(records)
@@ -474,7 +570,7 @@ class Reconciliation:
             )
             absent = m3u and self.store.absent(row["path"])
             if not duplicate and not absent:
-                if not os.path.lexists(row["path"]) and not dry_run:
+                if not dry_run and not os.path.lexists(row["path"]):
                     self.store.forget(row["path"])
                     self.report["missing"] += 1
                 continue

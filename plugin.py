@@ -1,7 +1,7 @@
 """
 VOD to Media Library — Dispatcharr VOD .strm Generator Plugin
 (slug: vod2mlib)
-v1.19.0-rc.7 — optional Emby reconciliation and persistent SQLite ownership tracking.
+v1.19.0-rc.8 — optional Emby reconciliation and persistent SQLite ownership tracking.
 
 MIT License
 Copyright (c) 2025-2026 shedunraid (original author)
@@ -36,7 +36,7 @@ class Plugin:
     """Generate .strm files for VOD movies from Dispatcharr."""
 
     name = "VOD to Media Library"
-    version = "1.19.0-rc.7"
+    version = "1.19.0-rc.8"
     help_url = "https://github.com/R3XCHRIS/VOD2MLIB#readme"
     description = (
         "Convert Dispatcharr VODs into media-server-friendly .strm files, with "
@@ -581,8 +581,10 @@ class Plugin:
                     if action in ("preview_cleanup", "selective_cleanup"):
                         result = {"status": "ok", "message": "Cleanup preview complete" if action == "preview_cleanup" else "Selective cleanup complete"}
                     else:
-                        result = self._run_action(action, params, context)
-                    reconciliation.drain()
+                        with reconciliation.measure("action_processing"):
+                            result = self._run_action(action, params, context)
+                    with reconciliation.measure("inventory_drain"):
+                        reconciliation.drain()
                     result['reconciliation'] = reconciliation.report
                     result['message'] += f"; excluded {reconciliation.report['excluded']}, deleted {reconciliation.report['deleted']}, cleanup errors {reconciliation.report['errors']}"
                     if reconciliation.report['warnings']:
@@ -593,6 +595,7 @@ class Plugin:
                         reconciliation.drain()
                     finally:
                         reconciliation.store.close()
+                        reconciliation.finish()
                         self._reconciliation = None
         except Exception as error:
             logger.error("Action failed: %s", error)
@@ -617,6 +620,13 @@ class Plugin:
         rec = getattr(self, '_reconciliation', None)
         if rec and rec.queue.qsize() >= BATCH_SIZE: rec.drain()
 
+    def _timed_operation(self, name, function, *args, **kwargs):
+        rec = getattr(self, "_reconciliation", None)
+        if rec is None:
+            return function(*args, **kwargs)
+        with rec.measure(name):
+            return function(*args, **kwargs)
+
     def _run_action(self, action: str, params: dict, context: dict):
         """Execute plugin action."""
         logger = context.get("logger")
@@ -630,9 +640,9 @@ class Plugin:
         if action == "scan_all_vods":
             return self._scan_all_vods(settings, logger)
         elif action == "generate_movies":
-            return self._generate_movies(settings, logger)
+            return self._timed_operation("generate_movies", self._generate_movies, settings, logger)
         elif action == "generate_series":
-            return self._generate_series(settings, logger)
+            return self._timed_operation("generate_series", self._generate_series, settings, logger)
         elif action == "cleanup_movies":
             return self._cleanup_movies(settings, logger)
         elif action == "cleanup_series":
@@ -2107,7 +2117,7 @@ class Plugin:
         logger.info("Combined rescan: scan + movies + series (refresh URLs forced ON)")
         logger.info("")
 
-        scan = self._scan_all_vods(settings, logger)
+        scan = self._timed_operation("scan_catalogue", self._scan_all_vods, settings, logger)
         if scan.get("status") != "ok":
             return scan
 
@@ -2115,14 +2125,14 @@ class Plugin:
         logger.info("=" * 60)
         logger.info("Rescan: movies  (refresh_urls=True)")
         logger.info("=" * 60)
-        movies = self._generate_movies(settings, logger, refresh_urls=True)
+        movies = self._timed_operation("generate_movies", self._generate_movies, settings, logger, refresh_urls=True)
 
         logger.info("")
         logger.info("=" * 60)
         logger.info("Rescan: series  (refresh_existing=True)")
         logger.info("=" * 60)
         series_settings = {**settings, "refresh_existing": True}
-        series = self._generate_series(series_settings, logger)
+        series = self._timed_operation("generate_series", self._generate_series, series_settings, logger)
 
         m = movies if isinstance(movies, dict) else {}
         s = series if isinstance(series, dict) else {}

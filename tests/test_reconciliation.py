@@ -1142,3 +1142,78 @@ def test_census_preserves_positions_sources_and_account_membership(library, monk
             assert Identity(**json.loads(row["identity"])) == identity_for(library.p, show, "series")
     finally:
         rec.store.close()
+
+
+def test_timing_metrics_account_for_batches_and_failed_phases(library, monkeypatch, caplog):
+    rec = Reconciliation(library.p, library.settings, LOG, library.tmp / "timing")
+    wall, cpu = iter([10.0, 12.0]), iter([2.0, 2.5])
+    monkeypatch.setattr("reconciliation.time.perf_counter", lambda: next(wall))
+    monkeypatch.setattr("reconciliation.time.process_time", lambda: next(cpu))
+    try:
+        with pytest.raises(RuntimeError, match="Failure"):
+            with rec.measure("failed_phase", 17):
+                raise RuntimeError("Failure")
+        assert rec.report["timings"]["failed_phase"] == {
+            "wall_seconds": 2.0, "cpu_seconds": 0.5, "calls": 1, "items": 17,
+        }
+    finally:
+        rec.store.close()
+
+
+def test_action_telemetry_survives_status_result_and_logs_no_settings(library, caplog):
+    library.rows["movies"].append(relation(media(1)))
+    with caplog.at_level(logging.INFO):
+        result = library.run(media_library_enabled=True, media_server_token="private-key")
+    report = result["reconciliation"]
+    timings = report["timings"]
+    assert report["worker_pid"] == os.getpid()
+    assert timings["catalogue_movie_read"]["items"] == 1
+    assert timings["catalogue_sqlite_write"]["items"] == 1
+    assert timings["catalogue_processing"]["wall_seconds"] >= 0
+    assert timings["total"]["wall_seconds"] >= timings["catalogue"]["wall_seconds"]
+    assert "generate_movies" in timings and "emby_snapshot" in timings
+    assert "VOD2MLIB timing summary" in caplog.text
+    assert "private-key" not in caplog.text
+    json.dumps(report)
+    saved = json.loads((library.tmp / "state" / "timings.json").read_text(encoding="utf8"))
+    assert saved["timings"] == timings
+    assert "private-key" not in json.dumps(saved)
+    if os.name == "posix":
+        assert (library.tmp / "state" / "timings.json").stat().st_mode & 0o777 == 0o600
+
+
+def test_preview_does_not_stat_non_candidates(library, monkeypatch):
+    library.rows["movies"].append(relation(media(1)))
+    library.run()
+    rec = Reconciliation(library.p, library.settings, LOG, library.tmp / "state")
+    monkeypatch.setattr("reconciliation.os.path.lexists",
+                        lambda *_: pytest.fail("Preview statted a non-candidate"))
+    try:
+        rec.cleanup(False, False, True)
+        assert rec.report["candidate"] == 0
+    finally:
+        rec.store.close()
+
+
+def test_discovery_skips_symlink_files_and_directories(tmp_path):
+    root, outside = tmp_path / "root", tmp_path / "outside"
+    root.mkdir(); outside.mkdir()
+    real = root / "nested"; real.mkdir()
+    (real / "movie.strm").write_text("generated")
+    (outside / "unrelated.strm").write_text("unrelated")
+    try:
+        (root / "linked-dir").symlink_to(outside, target_is_directory=True)
+        (root / "linked-file.strm").symlink_to(outside / "unrelated.strm")
+    except OSError:
+        pytest.skip("Symlink creation unavailable")
+    assert list(Reconciliation.generated_paths(root)) == [str(real / "movie.strm")]
+    assert list(Reconciliation.generated_paths(tmp_path / "missing")) == []
+
+
+def test_no_tracked_episodes_skips_m3u_show_scan(library, monkeypatch):
+    rec = Reconciliation(library.p, library.settings, LOG, library.tmp / "state")
+    monkeypatch.setattr(Query, "iterator", lambda *_args, **_kw: pytest.fail("Unneeded scan"))
+    try:
+        assert rec.refresh_tracked_series() is False
+    finally:
+        rec.store.close()

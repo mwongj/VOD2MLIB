@@ -201,3 +201,18 @@ def test_private_request_and_status_do_not_expose_settings(tmp_path, monkeypatch
     )
     if os.name == "posix":
         assert request.stat().st_mode & 0o077 == 0
+
+
+def test_completed_status_includes_timing_summary(tmp_path):
+    runner.write_json(tmp_path / "job.json", {
+        "id": "test", "state": "completed", "message": "Cleanup complete",
+        "result": {"reconciliation": {"timings": {
+            "total": {"wall_seconds": 31.25},
+            "catalogue": {"wall_seconds": 19.01},
+        }}},
+    })
+    first, second = runner.status(tmp_path), runner.status(tmp_path)
+    assert first["message"] == second["message"]
+    assert "total 31.2s" in first["message"]
+    assert "catalogue 19.0s" in first["message"]
+    assert first["message"].count("timing:") == 1

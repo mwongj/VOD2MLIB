@@ -22,7 +22,7 @@
 
 ---
 
-## Media-library reconciliation (1.19.0-rc.7)
+## Media-library reconciliation (1.19.0-rc.8)
 
 Optional integration with one Emby server prevents generated STRMs from duplicating real media. Integration is disabled by default. Configure the server URL and API key, enable integration, then use **List media libraries** to find names/IDs and enter the real-media libraries you want checked. Explicit library names or IDs are required; there is no all-libraries option. Leave generated VOD/STRM libraries out to avoid fetching and discarding their contents. Empty, missing or ambiguous selections stop actions even with the continue-on-server-failure policy. Existing installations and scheduled snapshots must be updated with explicit names or IDs. Names are resolved on every run (case-insensitive exact matching), so a recreated library with the same name uses its new ID. Duplicate names require an ID. STRM-only, remote and virtual Emby entries do not count as owned; a movie with both a real file and a STRM does.
 
@@ -273,3 +273,7 @@ Bulk listings request provider IDs and paths rather than playback MediaSources. 
 The complete Dispatcharr catalogue census projects only identity, source, UUID, and episode-position columns. It joins media records without unrelated account metadata. Cleanup reuses the census unless a tracked provider show was refreshed, and status reports processed row counts. Existing tracked paths skip legacy-adoption checks; deletion still verifies ownership and containment at the point of removal.
 
 Catalogue reads stream projected tuples rather than constructing Django models for each row. Action-local caches hold at most 8,192 identities and show/account membership checks; repeated episodes reuse cleaned metadata without retaining the complete catalogue in memory. SQLite still writes in transactions of up to 1,000 rows.
+
+Action results include local timing telemetry: wall seconds, worker-process CPU seconds, batch counts and row counts, with the worker PID. Action status shows a short phase summary after completion; detailed metrics are retained in the completed result and `/data/vod2mlib/timings.json` (latest run, private permissions). Timing summaries are also emitted through the action logger. No credentials, settings, URLs or file paths are recorded in timing telemetry, and nothing is sent externally. Phase totals contain their detailed child measurements, so do not add parent and child durations together. Worker CPU time includes its threads but excludes separate provider/Dispatcharr processes; total timing excludes subprocess startup.
+
+Catalogue lookup indices are built once after the complete streamed load, before adoption or cleanup. Temporary SQLite tables remain on disk with a bounded 32 MiB page cache; persistent inventory transactions and durability are unchanged. Generated-output discovery uses directory-entry type information and skips symlink entries. Preview avoids existence checks for non-candidates; actual deletion still verifies file ownership and containment. M3U provider refresh selection skips its series scan if no generated episodes are tracked, after legacy adoption. Live verification on 627,500 catalogue rows reduced a cleanup preview from 87 to about 31 seconds with zero errors/warnings.
