@@ -1,6 +1,6 @@
 {
   "name": "VOD to Media Library",
-  "version": "1.18.0",
+  "version": "1.19.0-rc.1",
   "description": "VOD → media library bridge. Generates .strm + NFO files from Dispatcharr's VOD catalogue, with optional cron-driven auto-rescan that picks up newly-added episodes.",
   "author": "R3XCHRIS",
   "license": "MIT",
@@ -9,6 +9,149 @@
   "help_url": "https://github.com/R3XCHRIS/VOD2MLIB#readme",
   "discord_thread": "https://discord.com/channels/1340492560220684331/1503076618078261374",
   "fields": [
+    {
+      "id": "media_library_enabled",
+      "label": "Enable media-library integration",
+      "type": "boolean",
+      "default": false
+    },
+    {
+      "id": "media_server",
+      "label": "Media server",
+      "type": "select",
+      "default": "emby",
+      "options": [
+        {
+          "value": "emby",
+          "label": "Emby"
+        }
+      ]
+    },
+    {
+      "id": "media_server_url",
+      "label": "Emby server URL",
+      "type": "string",
+      "default": ""
+    },
+    {
+      "id": "media_server_token",
+      "label": "Emby API key/token",
+      "type": "string",
+      "default": ""
+    },
+    {
+      "id": "media_library_scope",
+      "label": "Library scope",
+      "type": "select",
+      "default": "all",
+      "options": [
+        {
+          "value": "all",
+          "label": "All libraries"
+        },
+        {
+          "value": "selected",
+          "label": "Selected libraries"
+        }
+      ]
+    },
+    {
+      "id": "media_library_ids",
+      "label": "Selected library IDs",
+      "type": "string",
+      "default": "",
+      "help_text": "Comma-separated IDs; use List media libraries to discover IDs."
+    },
+    {
+      "id": "media_tv_mode",
+      "label": "TV handling",
+      "type": "select",
+      "default": "show",
+      "options": [
+        {
+          "value": "show",
+          "label": "Skip entire owned show"
+        },
+        {
+          "value": "episodes",
+          "label": "Fill missing episodes"
+        }
+      ]
+    },
+    {
+      "id": "media_server_failure",
+      "label": "Server-check failure",
+      "type": "select",
+      "default": "continue",
+      "options": [
+        {
+          "value": "continue",
+          "label": "Continue with warning"
+        },
+        {
+          "value": "stop",
+          "label": "Stop before file changes"
+        }
+      ]
+    },
+    {
+      "id": "media_duplicate_cleanup",
+      "label": "Existing duplicate cleanup",
+      "type": "select",
+      "default": "every",
+      "options": [
+        {
+          "value": "every",
+          "label": "Every generation"
+        },
+        {
+          "value": "rescan",
+          "label": "Full rescans only"
+        },
+        {
+          "value": "disabled",
+          "label": "Disabled"
+        }
+      ]
+    },
+    {
+      "id": "m3u_cleanup_enabled",
+      "label": "Clean up M3U removals",
+      "type": "boolean",
+      "default": false
+    },
+    {
+      "id": "m3u_cleanup_timing",
+      "label": "M3U cleanup timing",
+      "type": "select",
+      "default": "rescan",
+      "options": [
+        {
+          "value": "rescan",
+          "label": "Full rescans"
+        },
+        {
+          "value": "manual",
+          "label": "Manual action only"
+        }
+      ]
+    },
+    {
+      "id": "deletion_scope",
+      "label": "Deletion scope",
+      "type": "select",
+      "default": "strm",
+      "options": [
+        {
+          "value": "strm",
+          "label": "STRMs only"
+        },
+        {
+          "value": "strm_nfo",
+          "label": "STRMs and unedited generated NFOs"
+        }
+      ]
+    },
     {
       "id": "_about",
       "label": "About",
@@ -55,13 +198,34 @@
       "type": "select",
       "default": "250",
       "options": [
-        {"value": "10", "label": "10 movies"},
-        {"value": "100", "label": "100 movies"},
-        {"value": "200", "label": "200 movies"},
-        {"value": "250", "label": "250 movies"},
-        {"value": "500", "label": "500 movies"},
-        {"value": "1000", "label": "1000 movies"},
-        {"value": "all", "label": "All movies"}
+        {
+          "value": "10",
+          "label": "10 movies"
+        },
+        {
+          "value": "100",
+          "label": "100 movies"
+        },
+        {
+          "value": "200",
+          "label": "200 movies"
+        },
+        {
+          "value": "250",
+          "label": "250 movies"
+        },
+        {
+          "value": "500",
+          "label": "500 movies"
+        },
+        {
+          "value": "1000",
+          "label": "1000 movies"
+        },
+        {
+          "value": "all",
+          "label": "All movies"
+        }
       ],
       "help_text": "Number of movies to process in this run. Start small (10) to verify, then scale up."
     },
@@ -106,8 +270,14 @@
       "type": "select",
       "default": "plex",
       "options": [
-        {"value": "plex", "label": "Plex / ChannelsDVR — {tmdb-123}"},
-        {"value": "jellyfin", "label": "Jellyfin / Emby — [tmdbid-123]"}
+        {
+          "value": "plex",
+          "label": "Plex / ChannelsDVR — {tmdb-123}"
+        },
+        {
+          "value": "jellyfin",
+          "label": "Jellyfin / Emby — [tmdbid-123]"
+        }
       ],
       "help_text": "Which convention to use for the TMDB folder tag — media servers disagree, and each ignores the other's format. `Plex / ChannelsDVR` writes `Cool Hand Luke (1967) {tmdb-378}`; `Jellyfin / Emby` writes `Cool Hand Luke (1967) [tmdbid-378]`. Only has an effect when `Append TMDB ID to folder names` is ON. Defaults to Plex for backwards compatibility with libraries generated before v1.16.1 — if you use Jellyfin or Emby, switch this to `jellyfin` or the tag is silently ignored by your server. ⚠ MIGRATION: changing the format renames every folder, and the plugin does NOT rename in place — the new names are written ALONGSIDE the old ones. Run `[⚠ DANGER] Clean up Movies` / `Series` first, then re-generate."
     },
@@ -130,14 +300,38 @@
       "type": "select",
       "default": "10",
       "options": [
-        {"value": "1", "label": "1 series (testing)"},
-        {"value": "5", "label": "5 series"},
-        {"value": "10", "label": "10 series"},
-        {"value": "25", "label": "25 series"},
-        {"value": "50", "label": "50 series"},
-        {"value": "100", "label": "100 series"},
-        {"value": "250", "label": "250 series"},
-        {"value": "all", "label": "All series (may time out — use the schedule)"}
+        {
+          "value": "1",
+          "label": "1 series (testing)"
+        },
+        {
+          "value": "5",
+          "label": "5 series"
+        },
+        {
+          "value": "10",
+          "label": "10 series"
+        },
+        {
+          "value": "25",
+          "label": "25 series"
+        },
+        {
+          "value": "50",
+          "label": "50 series"
+        },
+        {
+          "value": "100",
+          "label": "100 series"
+        },
+        {
+          "value": "250",
+          "label": "250 series"
+        },
+        {
+          "value": "all",
+          "label": "All series (may time out — use the schedule)"
+        }
       ],
       "help_text": "Number of series to process per click (episodes are auto-fetched for each, so series are much slower than movies). ⚠ This button runs synchronously and your reverse proxy will usually cut it off after ~60s with a 504 — the run keeps going server-side, but you lose the result. For a big catalogue don't use 'All' here: set the cron to 'Full rescan' and click [SCHEDULE] Apply / Update. Scheduled runs execute on the Celery worker with no HTTP timeout."
     },
@@ -196,15 +390,42 @@
       "type": "select",
       "default": "rescan_all",
       "options": [
-        {"value": "scan_all_vods", "label": "Scan only (totals)"},
-        {"value": "generate_movies", "label": "Movies only"},
-        {"value": "generate_series", "label": "Series only"},
-        {"value": "rescan_all", "label": "Full rescan (movies + series)"}
+        {
+          "value": "scan_all_vods",
+          "label": "Scan only (totals)"
+        },
+        {
+          "value": "generate_movies",
+          "label": "Movies only"
+        },
+        {
+          "value": "generate_series",
+          "label": "Series only"
+        },
+        {
+          "value": "rescan_all",
+          "label": "Full rescan (movies + series)"
+        }
       ],
       "help_text": "Which action the scheduler should run on each tick. 'Full rescan' is recommended."
     }
   ],
   "actions": [
+    {
+      "id": "list_media_libraries",
+      "label": "List media libraries",
+      "description": "List Emby library names and IDs."
+    },
+    {
+      "id": "preview_cleanup",
+      "label": "Preview selective cleanup",
+      "description": "Check complete catalogues and log verified cleanup candidates without deleting output files."
+    },
+    {
+      "id": "selective_cleanup",
+      "label": "Run selective cleanup",
+      "description": "Delete verified duplicates and confirmed M3U removals according to configured settings."
+    },
     {
       "id": "scan_all_vods",
       "label": "[LIBRARY] Catalogue snapshot",
@@ -287,27 +508,27 @@
     {
       "id": "cleanup_movies",
       "label": "[⚠ DANGER] Clean up Movies",
-      "description": "Delete plugin .strm/.nfo from Movies root. User files preserved.",
+      "description": "Delete verified generated STRMs inside this root; NFO deletion follows Deletion scope. Unverified and edited files are preserved.",
       "button_label": "Clean up",
       "button_variant": "filled",
       "button_color": "red",
       "confirm": {
         "required": true,
         "title": "Delete generated movie files?",
-        "message": "This deletes every .strm and .nfo file this plugin created under your Movies root. User-added files (subtitles, posters, custom .nfo) in those folders are preserved. Continue?"
+        "message": "Delete verified generated STRMs in this root? NFOs are deleted only if Deletion scope includes NFOs and their generated hashes match. Unverified and edited files are preserved."
       }
     },
     {
       "id": "cleanup_series",
       "label": "[⚠ DANGER] Clean up Series",
-      "description": "Delete plugin .strm/.nfo from Series root. User files preserved.",
+      "description": "Delete verified generated STRMs inside this root; NFO deletion follows Deletion scope. Unverified and edited files are preserved.",
       "button_label": "Clean up",
       "button_variant": "filled",
       "button_color": "red",
       "confirm": {
         "required": true,
         "title": "Delete generated series files?",
-        "message": "This deletes every .strm and .nfo file this plugin created under your Series root. User-added files in those folders are preserved. Continue?"
+        "message": "Delete verified generated STRMs in this root? NFOs are deleted only if Deletion scope includes NFOs and their generated hashes match. Unverified and edited files are preserved."
       }
     }
   ]

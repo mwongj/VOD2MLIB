@@ -22,6 +22,28 @@
 
 ---
 
+## Media-library reconciliation (1.19.0-rc.1)
+
+Optional integration with one Emby server prevents generated STRMs from duplicating real media. Integration is disabled by default. Configure the server URL and API key, enable integration, then use **List media libraries** to find IDs if you want to limit checks to selected libraries. The default checks all libraries. STRM-only, remote and virtual Emby entries do not count as owned; a movie with both a real file and a STRM does.
+
+Movies and shows match separately, first by TMDB or IMDb ID. When comparable IDs are unavailable, an exact cleaned title and known matching year can match. Conflicting IDs, unknown years and fuzzy titles are retained. A show counts as owned only when Emby has actual non-STRM episodes. **Skip entire owned show** is the default; **Fill missing episodes** compares season/episode positions, including specials and multi-episode files. Uncertain positions are retained in missing-episode mode.
+
+Existing duplicate cleanup defaults to every generation. It runs before generation across the tracked output, independently of batch limits; full rescans share one complete paginated Emby snapshot across both generators. Cleanup can instead run only on full rescans or be disabled. Matching still prevents generation of owned content when automatic cleanup is disabled. When real media disappears from Emby, normal generation can restore eligible STRMs; use a full rescan or Refresh Existing Series to revisit already-processed series. Missing-episode mode automatically revisits existing series folders.
+
+**Preview selective cleanup** logs candidates without deleting output files. **Run selective cleanup** applies the configured server and M3U checks immediately, overriding their automatic timing. Preview refreshes the Dispatcharr episode catalogue when M3U cleanup is enabled and may initialize/adopt inventory records.
+
+M3U-removal cleanup is separately disabled by default. When enabled, it uses the complete Dispatcharr catalogue, including content outside current generation batches and disabled categories. It uses account/provider stream IDs rather than UUIDs alone. Full rescans are the default timing; manual-only timing is available. Confirmed removals are deleted on the first complete check, with no grace period. Episode refresh responses and completion are verified; failed or incomplete queries/refreshes never establish absence. Native Dispatcharr category selections still determine generation eligibility.
+
+The default deletion scope is **STRMs only**. The optional **STRMs and unedited generated NFOs** scope also deletes sidecars whose recorded generated hashes still match. STRM ownership uses the recorded URL text, not a hash. Edited STRMs/NFOs, unverified legacy NFOs, artwork, subtitles and unrelated files are preserved. Empty directories can be removed; roots are retained. Recognizable legacy Dispatcharr STRMs are adopted using their proxy URLs and complete catalogue metadata; ambiguous files are preserved and counted. The existing Movies/Series cleanup actions also use these ownership checks.
+
+On an Emby failure, **Continue with warning** is the default: generation proceeds without server exclusions or server deletion, and the warning appears in the action result. **Stop before file changes** aborts the action before changing output files. M3U cleanup remains independent under the continue policy. Results and logs report exclusions, deletions, preserved files and errors.
+
+A plugin-owned SQLite inventory lives at `/data/vod2mlib/inventory.sqlite3`, beside `/data/plugins`, outside plugin installations and media roots. Keep Dispatcharr's `/data` volume persistent across upgrades. An operator can override the state directory with `VOD2MLIB_STATE_DIR`; use persistent local storage outside both media roots and the plugin installation. The inventory uses schema versioning, indexed source/metadata/path lookups, bulk `executemany()` writes in transactions of up to 1,000 records, bounded queues and streamed catalogue reads. Batched lookups are split to respect SQLite parameter limits. Parent-thread writes and a process lock serialize generation and cleanup. Only generated NFOs are hashed; media files are never hashed. No new runtime dependencies are required.
+
+Apply/Update the existing schedule after changing integration or cleanup settings; these settings, including credentials, are stored in the schedule snapshot. Jellyfin and Plex adapters are not included in this prerelease.
+
+---
+
 ## Install
 
 1. **Map a host folder to `/VODS` in your Dispatcharr container** (see [Sharing the VODs folder](#sharing-the-vods-folder-with-media-servers) for *why* this matters and how to share with other apps).
