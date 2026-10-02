@@ -4,6 +4,7 @@ import json
 import os
 import re
 import sqlite3
+import stat
 import threading
 import time
 from contextlib import contextmanager
@@ -86,6 +87,9 @@ class Reconciliation:
             "warnings": [],
             "timings": {},
             "worker_pid": os.getpid(),
+            "adopted": 0,
+            "discovery_scanned_roots": 0,
+            "discovery_skipped_roots": 0,
         }
         self.roots = [
             settings.get("root_folder", "/VODS/Movies"),
@@ -163,6 +167,14 @@ class Reconciliation:
         self.logger.warning(message)
 
     def prepare(self, action):
+        if action == "rebuild_inventory":
+            # Discover output without any media-server checks, provider refreshes
+            # or deletion. Existing ownership and generated NFO hashes survive.
+            with self.measure("catalogue"):
+                self.census()
+            with self.measure("legacy_adoption"):
+                self.adopt(force=True)
+            return
         if self.settings.get("media_library_enabled", False):
             libraries = list(dict.fromkeys(
                 s.strip() for s in self.settings.get("media_library_ids", "").split(",")
@@ -478,7 +490,7 @@ class Reconciliation:
             )
 
     @staticmethod
-    def generated_paths(root):
+    def generated_paths(root, missing_ok=True):
         # DirEntry uses the directory listing's type information. os.walk plus
         # path-based islink checks used multiple network filesystem stats per dir.
         try:
@@ -487,18 +499,35 @@ class Reconciliation:
                     if entry.is_symlink():
                         continue
                     if entry.is_dir(follow_symlinks=False):
-                        yield from Reconciliation.generated_paths(entry.path)
+                        yield from Reconciliation.generated_paths(entry.path, missing_ok=False)
                     elif entry.name.endswith(".strm"):
                         yield entry.path
         except FileNotFoundError:
+            if not missing_ok:
+                raise
             return
 
-    def adopt(self):
+    def adopt(self, force=False):
         self.progress("Adopting recognizable generated output")
         host = urlparse(self.settings.get("dispatcharr_url", ""))
-        records = []
-        for root in self.roots:
-            for discovered in self.generated_paths(root):
+        context = json.dumps([host.scheme, host.netloc])
+        for root in dict.fromkeys(self.roots):
+            root_key = os.path.normcase(os.path.realpath(root))
+            if not force and self.store.discovery_complete(root_key, context):
+                self.report["discovery_skipped_roots"] += 1
+                continue
+            # Invalidate before scanning, including forced scans: failures retry.
+            self.store.invalidate_discovery(root_key)
+            try:
+                root_stat = os.stat(root)
+            except FileNotFoundError:
+                # Do not mark a missing root; discover it if it appears later.
+                continue
+            if not stat.S_ISDIR(root_stat.st_mode):
+                raise ValueError("An output root is not a directory")
+            records, incomplete = [], False
+            self.report["discovery_scanned_roots"] += 1
+            for discovered in self.generated_paths(root, missing_ok=False):
                 path = os.path.abspath(discovered)
                 if self.store.db.execute(
                     "SELECT 1 FROM files WHERE path=?", (path,)
@@ -532,6 +561,7 @@ class Reconciliation:
                     if len(identities) != 1:
                         self.report["preserved"] += 1
                         continue
+                    self.report["adopted"] += 1
                     for row in rows:
                         records.append(
                             (
@@ -548,11 +578,16 @@ class Reconciliation:
                             self.store.record_many(records)
                             records = []
                     # Legacy NFOs have no recorded generated hash: preserve them.
-                except (OSError, UnicodeError, ValueError):
+                except OSError:
+                    incomplete = True
                     self.report["preserved"] += 1
-
-        if records:
-            self.store.record_many(records)
+                except (UnicodeError, ValueError):
+                    self.report["preserved"] += 1
+            if records:
+                self.store.record_many(records)
+            if incomplete:
+                raise OSError("Output discovery incomplete; retry pending")
+            self.store.mark_discovered(root_key, context)
 
     def cleanup(self, server, m3u, dry_run=False):
         self.progress(

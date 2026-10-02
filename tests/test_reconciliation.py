@@ -434,7 +434,7 @@ def test_schema_persistence_missing_files_and_rollback(tmp_path):
     file.write_text("url")
     identity = Identity("movie", "A", 2000, "1")
     store.record(str(file), identity, "source")
-    assert store.db.execute("PRAGMA user_version").fetchone()[0] == 1
+    assert store.db.execute("PRAGMA user_version").fetchone()[0] == 2
     store.close()
     store = InventoryStore(tmp_path / "state")
     assert list(store.rows())[0]["tmdb"] == "1"
@@ -1217,3 +1217,112 @@ def test_no_tracked_episodes_skips_m3u_show_scan(library, monkeypatch):
         assert rec.refresh_tracked_series() is False
     finally:
         rec.store.close()
+
+
+
+def write_external_strm(library, obj, root=None):
+    root = Path(root or library.settings["root_folder"])
+    root.mkdir(parents=True, exist_ok=True)
+    path = root / f"external-{obj.id}.strm"
+    path.write_text(library.p._build_proxy_url(
+        library.settings["dispatcharr_url"], "movie", obj.uuid, str(obj.id),
+    ), encoding="utf8")
+    return path
+
+
+def test_initial_discovery_then_external_addition_requires_rebuild(library):
+    a, b = media(1), media(2)
+    library.rows["movies"].extend([relation(a), relation(b)])
+    first = write_external_strm(library, a)
+    result = library.run("preview_cleanup")
+    assert result["reconciliation"]["adopted"] == 1
+    assert result["reconciliation"]["discovery_scanned_roots"] == 1
+    second = write_external_strm(library, b)
+    nfo = second.with_suffix(".nfo"); nfo.write_text("Custom NFO")
+    result = library.run("preview_cleanup")
+    assert result["reconciliation"]["discovery_skipped_roots"] == 1
+    assert result["reconciliation"]["adopted"] == 0
+    # Rebuild is independent of media-server configuration/failure and never deletes.
+    library.state["error"] = RuntimeError("Offline")
+    result = library.run("rebuild_inventory", media_library_enabled=True,
+                         media_library_ids="", m3u_cleanup_enabled=True)
+    assert result["status"] == "ok"
+    assert result["reconciliation"]["adopted"] == 1
+    assert result["reconciliation"]["deleted"] == 0
+    assert first.exists() and second.exists() and nfo.read_text() == "Custom NFO"
+    assert library.state["requests"] == []
+    store = InventoryStore(library.tmp / "state")
+    assert len(list(store.rows())) == 2
+    assert all(json.loads(r["nfos"]) == {} for r in store.rows())
+    store.close()
+
+
+def test_rebuild_preserves_existing_ownership_and_generated_nfo_hashes(library):
+    obj = media(1)
+    library.rows["movies"].append(relation(obj))
+    library.run()
+    store = InventoryStore(library.tmp / "state")
+    before = [tuple(row) for row in store.rows()]; store.close()
+    nfo = next(library.tmp.rglob("*.nfo")); nfo.write_text("Edited metadata")
+    strm = next(library.tmp.rglob("*.strm")); strm.write_text("http://user-custom/file")
+    result = library.run("rebuild_inventory")
+    assert result["status"] == "ok" and result["reconciliation"]["adopted"] == 0
+    store = InventoryStore(library.tmp / "state")
+    assert [tuple(row) for row in store.rows()] == before
+    store.close()
+    assert strm.read_text() == "http://user-custom/file" and nfo.read_text() == "Edited metadata"
+
+
+def test_discovery_markers_survive_schema_one_upgrade(tmp_path):
+    store = InventoryStore(tmp_path / "state")
+    path = tmp_path / "movie.strm"; path.write_text("url")
+    store.record(str(path), Identity("movie", "A", 2000, "1"), "source",
+                 nfos={str(tmp_path / "movie.nfo"): "generated-hash"})
+    before = [tuple(row) for row in store.rows()]
+    store.db.execute("DROP TABLE discovery_roots")
+    store.db.execute("PRAGMA user_version=1"); store.close()
+    store = InventoryStore(tmp_path / "state")
+    assert store.db.execute("PRAGMA user_version").fetchone()[0] == 2
+    assert [tuple(row) for row in store.rows()] == before
+    store.mark_discovered("root", "context"); store.close()
+    store = InventoryStore(tmp_path / "state")
+    assert store.discovery_complete("root", "context")
+    assert not store.discovery_complete("root", "new-context")
+    store.close()
+
+
+def test_changed_and_previously_missing_roots_discovered_automatically(library):
+    obj = media(1); library.rows["movies"].append(relation(obj))
+    library.run("preview_cleanup")  # Missing roots must not be marked complete.
+    write_external_strm(library, obj)
+    assert library.run("preview_cleanup")["reconciliation"]["adopted"] == 1
+    other = library.tmp / "new-output"
+    write_external_strm(library, obj, other)
+    result = library.run("preview_cleanup", root_folder=str(other))
+    assert result["reconciliation"]["adopted"] == 1
+    assert result["reconciliation"]["discovery_scanned_roots"] == 1
+
+
+@pytest.mark.parametrize("failure", ["traversal", "read"])
+def test_failed_forced_discovery_invalidates_marker_and_retries(library, monkeypatch, failure):
+    a, b = media(1), media(2)
+    library.rows["movies"].extend([relation(a), relation(b)])
+    write_external_strm(library, a); library.run("preview_cleanup")
+    second = write_external_strm(library, b)
+    with monkeypatch.context() as patch:
+        if failure == "traversal":
+            def failed(*_args, **_kwargs):
+                raise PermissionError("Traversal failed")
+            patch.setattr(Reconciliation, "generated_paths", staticmethod(failed))
+        else:
+            read = Path.read_text
+            def failed(path, *args, **kwargs):
+                if path == second:
+                    raise PermissionError("Read failed")
+                return read(path, *args, **kwargs)
+            patch.setattr(Path, "read_text", failed)
+        assert library.run("rebuild_inventory")["status"] == "error"
+    result = library.run("preview_cleanup")
+    assert result["reconciliation"]["discovery_scanned_roots"] == 1
+    assert result["reconciliation"]["adopted"] == 1
+    assert second.exists()

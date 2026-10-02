@@ -74,14 +74,15 @@ def test_deadline_stops_descendants(tmp_path):
             runner.terminate(parent)
 
 
-def test_async_dispatch_and_stop(monkeypatch, tmp_path):
+@pytest.mark.parametrize("action", ["selective_cleanup", "rebuild_inventory"])
+def test_async_dispatch_and_stop(monkeypatch, tmp_path, action):
     monkeypatch.setenv("VOD2MLIB_STATE_DIR", str(tmp_path))
     calls = []
     monkeypatch.setattr(
         runner, "start", lambda *args: calls.append(args) or {"status": "ok"}
     )
-    assert Plugin().run("selective_cleanup", {}, {"settings": {}})["status"] == "ok"
-    assert calls[0][0] == "selective_cleanup"
+    assert Plugin().run(action, {}, {"settings": {}})["status"] == "ok"
+    assert calls[0][0] == action
     job = {
         "id": "test",
         "pid": os.getpid(),

@@ -1,7 +1,7 @@
 """
 VOD to Media Library — Dispatcharr VOD .strm Generator Plugin
 (slug: vod2mlib)
-v1.19.0-rc.8 — optional Emby reconciliation and persistent SQLite ownership tracking.
+v1.19.0-rc.9 — optional Emby reconciliation and persistent SQLite ownership tracking.
 
 MIT License
 Copyright (c) 2025-2026 shedunraid (original author)
@@ -36,7 +36,7 @@ class Plugin:
     """Generate .strm files for VOD movies from Dispatcharr."""
 
     name = "VOD to Media Library"
-    version = "1.19.0-rc.8"
+    version = "1.19.0-rc.9"
     help_url = "https://github.com/R3XCHRIS/VOD2MLIB#readme"
     description = (
         "Convert Dispatcharr VODs into media-server-friendly .strm files, with "
@@ -448,7 +448,10 @@ class Plugin:
                    'options': [{'value': str(n), 'label': str(n)} for n in (5, 15, 30, 60, 120)],
                    'help_text': 'Stops a generation, library check or cleanup and all its workers after this deadline. Background actions continue after the browser closes. Use Action status for results or Stop running action to cancel sooner. Completed file changes remain; retry resumes normal processing.'})
 
-    actions = [{'id': 'list_media_libraries',
+    actions = [{'id': 'rebuild_inventory',
+      'label': '[LIBRARY] Rebuild / discover inventory',
+      'description': 'Rescan configured output roots and adopt recognizable generated STRMs copied or restored outside the plugin. Preserves existing ownership and NFO hashes; deletes no output files. Unverified files are preserved and reported.'},
+     {'id': 'list_media_libraries',
       'label': 'List media libraries',
       'description': 'List Emby library names and IDs.'},
      {'id': 'preview_cleanup',
@@ -556,7 +559,7 @@ class Plugin:
             return action_runner.status()
         if action == "stop_action":
             return action_runner.stop()
-        if action in {"generate_movies", "generate_series", "rescan_all", "cleanup_movies", "cleanup_series", "preview_cleanup", "selective_cleanup", "list_media_libraries"}:
+        if action in {"generate_movies", "generate_series", "rescan_all", "cleanup_movies", "cleanup_series", "preview_cleanup", "selective_cleanup", "list_media_libraries", "rebuild_inventory"}:
             return action_runner.start(action, params, settings)
         return self._run_action(action, params, context)
 
@@ -568,7 +571,7 @@ class Plugin:
                 return {"status": "ok", "message": "; ".join(f"{x['Name']}: {x['Id']}" for x in libraries), "libraries": libraries}
             except Exception as error:
                 return {"status": "error", "message": str(error)}
-        mutating = {"generate_movies", "generate_series", "rescan_all", "cleanup_movies", "cleanup_series", "preview_cleanup", "selective_cleanup"}
+        mutating = {"generate_movies", "generate_series", "rescan_all", "cleanup_movies", "cleanup_series", "preview_cleanup", "selective_cleanup", "rebuild_inventory"}
         if action not in mutating:
             return self._run_action(action, params, context)
         reconciliation = None
@@ -578,7 +581,9 @@ class Plugin:
                 self._reconciliation = reconciliation
                 try:
                     reconciliation.prepare(action)
-                    if action in ("preview_cleanup", "selective_cleanup"):
+                    if action == "rebuild_inventory":
+                        result = {"status": "ok", "message": f"Inventory discovery complete; adopted {reconciliation.report['adopted']}, preserved {reconciliation.report['preserved']} unverified files"}
+                    elif action in ("preview_cleanup", "selective_cleanup"):
                         result = {"status": "ok", "message": "Cleanup preview complete" if action == "preview_cleanup" else "Selective cleanup complete"}
                     else:
                         with reconciliation.measure("action_processing"):

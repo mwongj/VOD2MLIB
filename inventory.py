@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import sqlite3
+import time
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -96,11 +97,12 @@ class InventoryStore:
         # tables on disk and leave persistent inventory durability unchanged.
         self.db.execute("PRAGMA temp.cache_size=-32768")
         version = self.db.execute("PRAGMA user_version").fetchone()[0]
-        if version not in (0, 1):
+        if version not in (0, 1, 2):
             self.db.close()
             raise ValueError("Unsupported inventory schema")
         with self.db:
             self.db.executescript("""
+                BEGIN;
                 CREATE TABLE IF NOT EXISTS files (
                     path TEXT PRIMARY KEY, kind TEXT NOT NULL, title TEXT NOT NULL,
                     year TEXT, tmdb TEXT, imdb TEXT, season INTEGER, episode INTEGER,
@@ -112,7 +114,10 @@ class InventoryStore:
                     path TEXT NOT NULL REFERENCES files(path), source TEXT NOT NULL,
                     PRIMARY KEY(path,source));
                 CREATE INDEX IF NOT EXISTS source_ids ON sources(source);
-                PRAGMA user_version=1;
+                CREATE TABLE IF NOT EXISTS discovery_roots (
+                    root TEXT PRIMARY KEY, context TEXT NOT NULL, completed_at REAL NOT NULL);
+                PRAGMA user_version=2;
+                COMMIT;
             """)
         self.db.execute("CREATE TEMP TABLE live(source TEXT PRIMARY KEY)")
         self.db.execute(
@@ -125,6 +130,22 @@ class InventoryStore:
 
     def close(self):
         self.db.close()
+
+    def discovery_complete(self, root, context):
+        return bool(self.db.execute(
+            "SELECT 1 FROM discovery_roots WHERE root=? AND context=?", (root, context),
+        ).fetchone())
+
+    def invalidate_discovery(self, root):
+        with self.db:
+            self.db.execute("DELETE FROM discovery_roots WHERE root=?", (root,))
+
+    def mark_discovered(self, root, context):
+        with self.db:
+            self.db.execute(
+                "INSERT OR REPLACE INTO discovery_roots VALUES (?,?,?)",
+                (root, context, time.time()),
+            )
 
     def record(self, path, identity, source="", position=None, nfos=None):
         self.record_many([(path, identity, source, position, nfos)])
