@@ -1,6 +1,6 @@
 {
   "name": "VOD to Media Library",
-  "version": "1.19.0-rc.2",
+  "version": "1.19.0-rc.3",
   "description": "VOD → media library bridge. Generates .strm + NFO files from Dispatcharr's VOD catalogue, with optional cron-driven auto-rescan that picks up newly-added episodes.",
   "author": "R3XCHRIS",
   "license": "MIT",
@@ -425,6 +425,35 @@
         }
       ],
       "help_text": "STRMs only preserves all NFO metadata. STRMs and unedited generated NFOs also removes NFOs whose recorded generated hashes still match. Edited or unverified files, artwork and subtitles are preserved. Applies to automatic, selective and Movies/Series cleanup actions."
+    },
+    {
+      "id": "action_timeout_minutes",
+      "label": "Maximum action runtime (minutes)",
+      "type": "select",
+      "default": "30",
+      "options": [
+        {
+          "value": "5",
+          "label": "5"
+        },
+        {
+          "value": "15",
+          "label": "15"
+        },
+        {
+          "value": "30",
+          "label": "30"
+        },
+        {
+          "value": "60",
+          "label": "60"
+        },
+        {
+          "value": "120",
+          "label": "120"
+        }
+      ],
+      "help_text": "Stops a generation, library check or cleanup and all its workers after this deadline. Background actions continue after the browser closes. Use Action status for results or Stop running action to cancel sooner. Completed file changes remain; retry resumes normal processing."
     }
   ],
   "actions": [
@@ -547,6 +576,16 @@
         "title": "Delete generated series files?",
         "message": "Delete verified generated STRMs in this root? NFOs are deleted only if Deletion scope includes NFOs and their generated hashes match. Unverified and edited files are preserved."
       }
+    },
+    {
+      "id": "action_status",
+      "label": "[ACTION] Status",
+      "description": "Show the running background action or its final result."
+    },
+    {
+      "id": "stop_action",
+      "label": "[ACTION] Stop running action",
+      "description": "Stop this plugin action and its workers; completed file changes remain."
     }
   ]
 }

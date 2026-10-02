@@ -1,7 +1,7 @@
 """
 VOD to Media Library — Dispatcharr VOD .strm Generator Plugin
 (slug: vod2mlib)
-v1.19.0-rc.2 — optional Emby reconciliation and persistent SQLite ownership tracking.
+v1.19.0-rc.3 — optional Emby reconciliation and persistent SQLite ownership tracking.
 
 MIT License
 Copyright (c) 2025-2026 shedunraid (original author)
@@ -18,10 +18,12 @@ from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 try:
     from .inventory import action_lock, state_directory, file_hash, contained, BATCH_SIZE
     from .reconciliation import Reconciliation
+    from . import action_runner
     from .media_library import create_adapter
 except ImportError:
     from inventory import action_lock, state_directory, file_hash, contained, BATCH_SIZE
     from reconciliation import Reconciliation
+    import action_runner
     from media_library import create_adapter
 
 
@@ -34,7 +36,7 @@ class Plugin:
     """Generate .strm files for VOD movies from Dispatcharr."""
 
     name = "VOD to Media Library"
-    version = "1.19.0-rc.2"
+    version = "1.19.0-rc.3"
     help_url = "https://github.com/R3XCHRIS/VOD2MLIB#readme"
     description = (
         "Convert Dispatcharr VODs into media-server-friendly .strm files, with "
@@ -447,6 +449,11 @@ class Plugin:
                    'whose recorded generated hashes still match. Edited or unverified files, artwork and '
                    'subtitles are preserved. Applies to automatic, selective and Movies/Series cleanup actions.'}]
 
+    fields.append({'id': 'action_timeout_minutes', 'label': 'Maximum action runtime (minutes)',
+                   'type': 'select', 'default': '30',
+                   'options': [{'value': str(n), 'label': str(n)} for n in (5, 15, 30, 60, 120)],
+                   'help_text': 'Stops a generation, library check or cleanup and all its workers after this deadline. Background actions continue after the browser closes. Use Action status for results or Stop running action to cancel sooner. Completed file changes remain; retry resumes normal processing.'})
+
     actions = [{'id': 'list_media_libraries',
       'label': 'List media libraries',
       'description': 'List Emby library names and IDs.'},
@@ -544,7 +551,22 @@ class Plugin:
                              'scope includes NFOs and their generated hashes match. Unverified and edited files '
                              'are preserved.'}}]
 
+    actions.extend([{'id': 'action_status', 'label': '[ACTION] Status',
+                     'description': 'Show the running background action or its final result.'},
+                    {'id': 'stop_action', 'label': '[ACTION] Stop running action',
+                     'description': 'Stop this plugin action and its workers; completed file changes remain.'}])
+
     def run(self, action: str, params: dict, context: dict):
+        settings = context.get("settings", {})
+        if action == "action_status":
+            return action_runner.status()
+        if action == "stop_action":
+            return action_runner.stop()
+        if action in {"generate_movies", "generate_series", "rescan_all", "cleanup_movies", "cleanup_series", "preview_cleanup", "selective_cleanup", "list_media_libraries"}:
+            return action_runner.start(action, params, settings)
+        return self._run_action(action, params, context)
+
+    def _run_locked_action(self, action: str, params: dict, context: dict):
         logger, settings = context.get("logger"), context.get("settings", {})
         if action == "list_media_libraries":
             try:
@@ -2439,7 +2461,7 @@ try:
         """
         import logging
         logger = logging.getLogger("vod2mlib.schedule")
-        result = Plugin().run(action, {}, {"logger": logger, "settings": settings or {}})
+        result = action_runner.run_and_wait(action, {}, settings or {})
         try:
             from django.utils import timezone
             from django_celery_beat.models import PeriodicTask

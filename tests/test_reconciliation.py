@@ -131,7 +131,7 @@ def library(tmp_path, monkeypatch):
     monkeypatch.setattr("plugin.create_adapter", lambda _: Adapter())
 
     def run(action="generate_movies", **updates):
-        return p.run(action, {}, {"logger": LOG, "settings": {**settings, **updates}})
+        return p._run_locked_action(action, {}, {"logger": LOG, "settings": {**settings, **updates}})
 
     return NS(
         p=p,
@@ -731,6 +731,22 @@ def test_m3u_episode_removal_and_reappearance(library, monkeypatch):
     library.rows["episodes"].append(ep2)
     result = library.run("generate_series", refresh_existing=True)
     assert result["episodes_created"] == 1
+
+
+def test_m3u_refresh_only_shows_with_generated_output(library, monkeypatch):
+    show = media(10)
+    other = media(20)
+    library.rows["series"].append(relation(show, "series"))
+    library.rows["episodes"].append(
+        relation(media(1, series=show, season_number=1, episode_number=1), "episode")
+    )
+    library.run("generate_series")
+    library.rows["series"].append(relation(other, "series"))
+    refreshed = []
+    monkeypatch.setattr(Reconciliation, "refresh_complete", lambda self, rel, _: refreshed.append(rel.series.id))
+    result = library.run("selective_cleanup", m3u_cleanup_enabled=True)
+    assert result["status"] == "ok"
+    assert refreshed == [10]
 
 
 @pytest.mark.parametrize(

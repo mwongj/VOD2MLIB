@@ -113,9 +113,13 @@ class Reconciliation:
         )
         # Refresh failures must never establish episode absence.
         try:
-            self.census(refresh=m3u)
-            self.m3u_complete = m3u
+            self.census()
             self.adopt()
+            if m3u:
+                for table in ("live", "live_series", "catalogue"):
+                    self.store.db.execute(f"DELETE FROM {table}")
+                self.census(refresh=True)
+            self.m3u_complete = m3u
         except Exception as error:
             self.m3u_complete = False
             self.warning(
@@ -149,7 +153,20 @@ class Reconciliation:
                 and self.settings.get("media_tv_mode", "show") == "show"
                 and self.snapshot.owns(identity_for(self.plugin, rel.series, "series"))
             )
-            if refresh and not owned_show:
+            identity = identity_for(self.plugin, rel.series, "series")
+            # Refresh only shows with generated output. The full census still
+            # includes every account/category and is never limited by batch size.
+            tracked = self.store.db.execute(
+                """SELECT 1 FROM files WHERE kind='series' AND
+                ((? != '' AND tmdb=?) OR (? != '' AND imdb=?) OR
+                 (title=? AND year=? AND ? IS NOT NULL
+                  AND (tmdb='' OR ?='' OR tmdb=?)
+                  AND (imdb='' OR ?='' OR imdb=?))) LIMIT 1""",
+                (identity.tmdb, identity.tmdb, identity.imdb, identity.imdb,
+                 identity.title, str(identity.year) if identity.year else None,
+                 identity.year, identity.tmdb, identity.tmdb, identity.imdb, identity.imdb),
+            ).fetchone() if refresh else None
+            if refresh and tracked and not owned_show:
                 self.refresh_complete(rel, refresh_series_episodes)
             series_batch.append((str(rel.series.uuid), str(rel.m3u_account_id)))
             if len(series_batch) == BATCH_SIZE:

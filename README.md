@@ -22,7 +22,7 @@
 
 ---
 
-## Media-library reconciliation (1.19.0-rc.2)
+## Media-library reconciliation (1.19.0-rc.3)
 
 Optional integration with one Emby server prevents generated STRMs from duplicating real media. Integration is disabled by default. Configure the server URL and API key, enable integration, then use **List media libraries** to find IDs if you want to limit checks to selected libraries. The default checks all libraries. STRM-only, remote and virtual Emby entries do not count as owned; a movie with both a real file and a STRM does.
 
@@ -255,3 +255,11 @@ The bundled logo is reproducible — replace `tools/source_logo.png` and run `py
 ## Changelog
 
 See [CHANGELOG.md](CHANGELOG.md) for the full release history.
+
+### Background actions and cancellation
+
+Generation, library listing, preview, and cleanup run in isolated background processes. The action button returns immediately; use **[ACTION] Status** to read the final result, exclusions, deletions, and warnings. **[ACTION] Stop running action** cancels the action and its worker group within a few seconds without restarting Dispatcharr or its stream workers.
+
+**Maximum action runtime (minutes)** defaults to 30 and applies to manual and scheduled actions. A separate supervisor enforces the deadline even during blocked HTTP, DNS, provider refreshes, and generation threads. Cancellation keeps completed file changes; the OS releases the SQLite/action locks and the next run reconciles inventory and missing files. Scheduled settings snapshots include this limit. Settings passed to workers are stored temporarily with private permissions, removed when the action exits, and never included in status output or command arguments.
+
+M3U cleanup still checks the complete catalogue, but refreshes provider episodes only for shows with recognizable generated output. It adopts legacy output before selecting refreshes. Failed checks disable M3U deletion for that run. A running action from an older plugin version cannot be cancelled by the new supervisor; its original process must finish or be recycled once.
