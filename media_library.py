@@ -97,7 +97,7 @@ class MediaLibraryAdapter(ABC):
 
 
 class EmbyAdapter(MediaLibraryAdapter):
-    PAGE_SIZE = 500
+    PAGE_SIZE = 2000  # Bound memory while reducing per-page server/count overhead.
 
     def __init__(self, url, token):
         if (

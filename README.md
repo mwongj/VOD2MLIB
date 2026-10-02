@@ -22,7 +22,7 @@
 
 ---
 
-## Media-library reconciliation (1.19.0-rc.4)
+## Media-library reconciliation (1.19.0-rc.5)
 
 Optional integration with one Emby server prevents generated STRMs from duplicating real media. Integration is disabled by default. Configure the server URL and API key, enable integration, then use **List media libraries** to find IDs if you want to limit checks to selected libraries. The default checks all libraries. STRM-only, remote and virtual Emby entries do not count as owned; a movie with both a real file and a STRM does.
 
@@ -265,3 +265,5 @@ Generation, library listing, preview, and cleanup run in isolated background pro
 M3U cleanup still checks the complete catalogue, but refreshes provider episodes only for shows with recognizable generated output. It adopts legacy output before selecting refreshes. Failed checks disable M3U deletion for that run. A running action from an older plugin version cannot be cancelled by the new supervisor; its original process must finish or be recycled once.
 
 Action status includes the current phase, Emby snapshot item counts, elapsed minutes, and remaining deadline. Tracked-show lookup uses the provider ID and title/year indices directly to avoid scanning all generated episodes for every catalogue show.
+
+Emby snapshots fetch up to 2,000 items per page with a 30-second request timeout. Complete-pagination checks still discard interrupted, changed, or repeated snapshots; the action deadline bounds the entire operation.
