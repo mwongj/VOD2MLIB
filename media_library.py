@@ -148,6 +148,9 @@ class EmbyAdapter(MediaLibraryAdapter):
                 seen.add(item["Id"])
                 yield item
             start += len(items)
+            callback = getattr(self, "progress", None)
+            if callback:
+                callback(f"Emby snapshot: {start:,} of {total:,} items fetched")
             if start == total:
                 break
             if not items or start > total:

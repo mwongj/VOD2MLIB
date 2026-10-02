@@ -42,18 +42,27 @@ def birth(pid):
             return None
     import ctypes
     from ctypes import wintypes
+
     kernel = ctypes.WinDLL("kernel32", use_last_error=True)
     kernel.OpenProcess.restype = wintypes.HANDLE
     kernel.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
-    kernel.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
-    kernel.GetProcessTimes.argtypes = [wintypes.HANDLE] + [ctypes.POINTER(wintypes.FILETIME)] * 4
+    kernel.GetExitCodeProcess.argtypes = [
+        wintypes.HANDLE,
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    kernel.GetProcessTimes.argtypes = [wintypes.HANDLE] + [
+        ctypes.POINTER(wintypes.FILETIME)
+    ] * 4
     kernel.CloseHandle.argtypes = [wintypes.HANDLE]
     handle = kernel.OpenProcess(0x1000, False, pid)
     if not handle:
         return None
     try:
         exit_code = wintypes.DWORD()
-        if not kernel.GetExitCodeProcess(handle, ctypes.byref(exit_code)) or exit_code.value != 259:
+        if (
+            not kernel.GetExitCodeProcess(handle, ctypes.byref(exit_code))
+            or exit_code.value != 259
+        ):
             return None
         times = [wintypes.FILETIME() for _ in range(4)]
         if not kernel.GetProcessTimes(handle, *(ctypes.byref(t) for t in times)):
@@ -61,7 +70,6 @@ def birth(pid):
         return str((times[0].dwHighDateTime << 32) | times[0].dwLowDateTime)
     finally:
         kernel.CloseHandle(handle)
-
 
 
 def status(directory=None):
@@ -72,6 +80,15 @@ def status(directory=None):
     if job["state"] in ACTIVE and birth(job["pid"]) != job["birth"]:
         job.update(
             state="interrupted", message="Action process exited; retry is available"
+        )
+    if job["state"] in ACTIVE:
+        elapsed = max(0, int((time.time() - job.get("started", time.time())) / 60))
+        remaining = max(0, int((job.get("deadline", time.time()) - time.time()) / 60))
+        progress = read_json(directory / f"{job['id']}.progress.json").get(
+            "phase", job.get("message", job["state"])
+        )
+        job["message"] = (
+            f"{progress}; elapsed {elapsed} min, deadline in {remaining} min"
         )
     return {"status": "ok", "message": job.get("message", job["state"]), "job": job}
 
@@ -233,7 +250,12 @@ def supervise(directory, job_id):
         )
     finally:
         write_json(directory / "job.json", job)
-        for path in (request, result_path, cancel):
+        for path in (
+            request,
+            result_path,
+            cancel,
+            directory / f"{job_id}.progress.json",
+        ):
             path.unlink(missing_ok=True)
 
 
@@ -259,7 +281,11 @@ def work(directory, job_id):
     django.setup()
     from plugin import Plugin
 
-    result = Plugin()._run_locked_action(
+    plugin = Plugin()
+    plugin._progress = lambda message: write_json(
+        directory / f"{job_id}.progress.json", {"phase": message}
+    )
+    result = plugin._run_locked_action(
         request["action"],
         request["params"],
         {

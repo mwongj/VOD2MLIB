@@ -110,6 +110,28 @@ def test_overlap_and_stale_pid(tmp_path):
     assert runner.stop(tmp_path)["message"] == "No background action is running"
 
 
+def test_status_reports_phase_and_remaining_deadline(tmp_path, monkeypatch):
+    monkeypatch.setattr(runner.time, "time", lambda: 1000)
+    runner.write_json(
+        tmp_path / "job.json",
+        {
+            "id": "test",
+            "pid": os.getpid(),
+            "birth": runner.birth(os.getpid()),
+            "state": "running",
+            "started": 700,
+            "deadline": 1900,
+        },
+    )
+    runner.write_json(
+        tmp_path / "test.progress.json",
+        {"phase": "Emby snapshot: 500 of 2,000 items fetched"},
+    )
+    message = runner.status(tmp_path)["message"]
+    assert "500 of 2,000" in message
+    assert "elapsed 5 min" in message and "deadline in 15 min" in message
+
+
 def test_legacy_lock_is_respected(tmp_path):
     with action_lock(tmp_path):
         result = runner.start("rescan_all", {}, {}, tmp_path)

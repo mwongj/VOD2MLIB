@@ -73,6 +73,11 @@ class Reconciliation:
         ]
         self.m3u_complete = False
 
+    def progress(self, message):
+        callback = getattr(self.plugin, "_progress", None)
+        if callback:
+            callback(message)
+
     def warning(self, message):
         self.report["warnings"].append(message)
         self.logger.warning(message)
@@ -90,7 +95,10 @@ class Reconciliation:
                     and not libraries
                 ):
                     raise ValueError("Selected library scope requires library IDs")
-                self.snapshot = create_adapter(self.settings).get_snapshot(
+                self.progress("Fetching Emby snapshot")
+                adapter = create_adapter(self.settings)
+                adapter.progress = self.progress
+                self.snapshot = adapter.get_snapshot(
                     libraries
                     if self.settings.get("media_library_scope", "all") == "selected"
                     else [],
@@ -140,6 +148,11 @@ class Reconciliation:
             M3USeriesRelation,
         )
 
+        self.progress(
+            "Checking complete Dispatcharr catalogue"
+            if not refresh
+            else "Checking M3U removals and refreshing tracked shows"
+        )
         series_batch = []
         if refresh:
             from apps.vod.tasks import refresh_series_episodes
@@ -156,16 +169,7 @@ class Reconciliation:
             identity = identity_for(self.plugin, rel.series, "series")
             # Refresh only shows with generated output. The full census still
             # includes every account/category and is never limited by batch size.
-            tracked = self.store.db.execute(
-                """SELECT 1 FROM files WHERE kind='series' AND
-                ((? != '' AND tmdb=?) OR (? != '' AND imdb=?) OR
-                 (title=? AND year=? AND ? IS NOT NULL
-                  AND (tmdb='' OR ?='' OR tmdb=?)
-                  AND (imdb='' OR ?='' OR imdb=?))) LIMIT 1""",
-                (identity.tmdb, identity.tmdb, identity.imdb, identity.imdb,
-                 identity.title, str(identity.year) if identity.year else None,
-                 identity.year, identity.tmdb, identity.tmdb, identity.imdb, identity.imdb),
-            ).fetchone() if refresh else None
+            tracked = self.tracked_series(identity) if refresh else False
             if refresh and tracked and not owned_show:
                 self.refresh_complete(rel, refresh_series_episodes)
             series_batch.append((str(rel.series.uuid), str(rel.m3u_account_id)))
@@ -227,6 +231,36 @@ class Reconciliation:
                     batch = []
         if batch:
             self._census_batch(batch)
+
+    def tracked_series(self, identity):
+        # Separate probes use all columns of the existing indices. A combined
+        # OR only used their kind prefix, scanning every tracked episode per show.
+        for column, value in (("tmdb", identity.tmdb), ("imdb", identity.imdb)):
+            if (
+                value
+                and self.store.db.execute(
+                    f"SELECT 1 FROM files WHERE kind='series' AND {column}=? LIMIT 1",
+                    (value,),
+                ).fetchone()
+            ):
+                return True
+        if not identity.year:
+            return False
+        return bool(
+            self.store.db.execute(
+                """SELECT 1 FROM files WHERE kind='series' AND title=? AND year=?
+               AND (tmdb='' OR ?='' OR tmdb=?)
+               AND (imdb='' OR ?='' OR imdb=?) LIMIT 1""",
+                (
+                    identity.title,
+                    str(identity.year),
+                    identity.tmdb,
+                    identity.tmdb,
+                    identity.imdb,
+                    identity.imdb,
+                ),
+            ).fetchone()
+        )
 
     @staticmethod
     def refresh_complete(rel, refresher):
@@ -318,6 +352,7 @@ class Reconciliation:
             )
 
     def adopt(self):
+        self.progress("Adopting recognizable generated output")
         host = urlparse(self.settings.get("dispatcharr_url", ""))
         records = []
         for root in self.roots:
@@ -384,6 +419,9 @@ class Reconciliation:
             self.store.record_many(records)
 
     def cleanup(self, server, m3u, dry_run=False):
+        self.progress(
+            "Previewing cleanup" if dry_run else "Reconciling generated files"
+        )
         for row in self.store.rows():
             identity = Identity(
                 row["kind"], row["title"], row["year"], row["tmdb"], row["imdb"]
