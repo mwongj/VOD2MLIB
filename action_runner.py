@@ -37,7 +37,8 @@ def read_json(path):
 def birth(pid):
     if os.name == "posix":
         try:
-            return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[19]
+            fields = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
+            return None if fields[0] == "Z" else fields[19]
         except OSError:
             return None
     import ctypes

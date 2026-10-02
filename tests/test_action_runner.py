@@ -110,6 +110,25 @@ def test_overlap_and_stale_pid(tmp_path):
     assert runner.stop(tmp_path)["message"] == "No background action is running"
 
 
+@pytest.mark.skipif(os.name != "posix", reason="Linux unreaped processes")
+def test_exited_unreaped_process_is_not_running():
+    process = subprocess.Popen([sys.executable, "-c", "pass"])
+    try:
+        limit = time.time() + 5
+        while time.time() < limit:
+            fields = (
+                Path(f"/proc/{process.pid}/stat").read_text().rsplit(")", 1)[1].split()
+            )
+            if fields[0] == "Z":
+                break
+            time.sleep(0.02)
+        else:
+            pytest.fail("process did not exit")
+        assert runner.birth(process.pid) is None
+    finally:
+        process.wait(timeout=5)
+
+
 def test_status_reports_phase_and_remaining_deadline(tmp_path, monkeypatch):
     monkeypatch.setattr(runner.time, "time", lambda: 1000)
     runner.write_json(
