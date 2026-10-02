@@ -132,6 +132,33 @@ def test_status_reports_phase_and_remaining_deadline(tmp_path, monkeypatch):
     assert "elapsed 5 min" in message and "deadline in 15 min" in message
 
 
+def test_supervisor_metadata_failure_cannot_orphan_worker(tmp_path, monkeypatch):
+    process = subprocess.Popen(
+        [sys.executable, "-c", "import time;time.sleep(60)"],
+        start_new_session=os.name == "posix",
+    )
+    runner.write_json(
+        tmp_path / "job.json",
+        {"id": "test", "action": "rescan_all", "deadline": time.time() + 60},
+    )
+    request = tmp_path / "test.request.json"
+    request.write_text('{"settings": {"token": "private"}}')
+    monkeypatch.setattr(subprocess, "Popen", lambda *args, **kwargs: process)
+
+    def full_disk(*args):
+        raise OSError("Disk full")
+
+    monkeypatch.setattr(runner, "write_json", full_disk)
+    try:
+        with pytest.raises(OSError, match="Disk full"):
+            runner.supervise(tmp_path, "test")
+        assert process.poll() is not None
+        assert not request.exists()
+    finally:
+        if process.poll() is None:
+            runner.terminate(process)
+
+
 def test_legacy_lock_is_respected(tmp_path):
     with action_lock(tmp_path):
         result = runner.start("rescan_all", {}, {}, tmp_path)

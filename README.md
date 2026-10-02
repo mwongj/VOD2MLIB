@@ -22,7 +22,7 @@
 
 ---
 
-## Media-library reconciliation (1.19.0-rc.5)
+## Media-library reconciliation (1.19.0-rc.6)
 
 Optional integration with one Emby server prevents generated STRMs from duplicating real media. Integration is disabled by default. Configure the server URL and API key, enable integration, then use **List media libraries** to find IDs if you want to limit checks to selected libraries. The default checks all libraries. STRM-only, remote and virtual Emby entries do not count as owned; a movie with both a real file and a STRM does.
 
@@ -266,4 +266,8 @@ M3U cleanup still checks the complete catalogue, but refreshes provider episodes
 
 Action status includes the current phase, Emby snapshot item counts, elapsed minutes, and remaining deadline. Tracked-show lookup uses the provider ID and title/year indices directly to avoid scanning all generated episodes for every catalogue show.
 
-Emby snapshots fetch up to 2,000 items per page with a 30-second request timeout. Complete-pagination checks still discard interrupted, changed, or repeated snapshots; the action deadline bounds the entire operation.
+Emby snapshots fetch up to 20,000 items per page with a 30-second request timeout. Complete-pagination checks still discard interrupted, changed, or repeated snapshots; the action deadline bounds the entire operation.
+
+Bulk listings request provider IDs and paths rather than playback MediaSources. The global `/Items` endpoint returns file versions as separate records; STRM versions are ignored by their paths. The first page and a final count-only request validate the total; intermediate pages disable repeated total counts. Each page must make progress, contain unique IDs, and stay within the initial count. The complete snapshot remains unusable until the final check succeeds.
+
+The complete Dispatcharr catalogue census projects only identity, source, UUID, and episode-position columns. It joins media records without unrelated account metadata. Cleanup reuses the census unless a tracked provider show was refreshed, and status reports processed row counts. Existing tracked paths skip legacy-adoption checks; deletion still verifies ownership and containment at the point of removal.

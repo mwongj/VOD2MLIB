@@ -97,7 +97,7 @@ class MediaLibraryAdapter(ABC):
 
 
 class EmbyAdapter(MediaLibraryAdapter):
-    PAGE_SIZE = 2000  # Bound memory while reducing per-page server/count overhead.
+    PAGE_SIZE = 20000  # Bounded bulk lists; no playback/source detail payloads.
 
     def __init__(self, url, token):
         if (
@@ -126,22 +126,22 @@ class EmbyAdapter(MediaLibraryAdapter):
         start, expected = 0, None
         seen = set()
         while True:
-            page = self._get(
-                "Items",
-                dict(
-                    params,
-                    StartIndex=start,
-                    Limit=self.PAGE_SIZE,
-                    EnableImages="false",
-                    EnableUserData="false",
-                ),
+            query = dict(
+                params,
+                StartIndex=start,
+                Limit=self.PAGE_SIZE,
+                EnableImages="false",
+                EnableUserData="false",
+                EnableTotalRecordCount="true" if expected is None else "false",
             )
-            items, total = page["Items"], page["TotalRecordCount"]
-            if not isinstance(items, list) or not isinstance(total, int) or total < 0:
+            page = self._get("Items", query)
+            items = page.get("Items")
+            if not isinstance(items, list):
                 raise ValueError("Invalid Emby page")
-            if expected is not None and total != expected:
-                raise ValueError("Emby catalogue changed during snapshot")
-            expected = total
+            if expected is None:
+                expected = page.get("TotalRecordCount")
+                if type(expected) is not int or expected < 0:
+                    raise ValueError("Invalid Emby item count")
             for item in items:
                 if item["Id"] in seen:
                     raise ValueError("Repeated Emby page")
@@ -150,11 +150,26 @@ class EmbyAdapter(MediaLibraryAdapter):
             start += len(items)
             callback = getattr(self, "progress", None)
             if callback:
-                callback(f"Emby snapshot: {start:,} of {total:,} items fetched")
-            if start == total:
+                callback(f"Emby snapshot: {start:,} of {expected:,} items fetched")
+            if start == expected:
                 break
-            if not items or start > total:
+            if not items or start > expected:
                 raise ValueError("Incomplete Emby snapshot")
+        # Recount only once at the end instead of re-running COUNT for every
+        # page. No matching/deletion can use the snapshot until this passes.
+        check = self._get(
+            "Items",
+            dict(
+                params,
+                StartIndex=0,
+                Limit=0,
+                EnableImages="false",
+                EnableUserData="false",
+                EnableTotalRecordCount="true",
+            ),
+        )
+        if check.get("Items") != [] or check.get("TotalRecordCount") != expected:
+            raise ValueError("Emby catalogue changed during snapshot")
 
     def list_libraries(self):
         return self._get("Library/MediaFolders", {})["Items"]
@@ -195,7 +210,9 @@ class EmbyAdapter(MediaLibraryAdapter):
             params = {
                 "Recursive": "true",
                 "IncludeItemTypes": "Movie,Series,Episode",
-                "Fields": "ProviderIds,Path,MediaSources",
+                "Fields": "ProviderIds,Path",
+                "GroupItemsIntoCollections": "false",
+                "CollapseBoxSetItems": "false",
                 "IsMissing": "false",
             }
             if library:

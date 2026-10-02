@@ -123,10 +123,10 @@ class Reconciliation:
         try:
             self.census()
             self.adopt()
-            if m3u:
+            if m3u and self.refresh_tracked_series():
                 for table in ("live", "live_series", "catalogue"):
                     self.store.db.execute(f"DELETE FROM {table}")
-                self.census(refresh=True)
+                self.census()
             self.m3u_complete = m3u
         except Exception as error:
             self.m3u_complete = False
@@ -141,37 +141,22 @@ class Reconciliation:
         )
         self.cleanup(server, self.m3u_complete, action == "preview_cleanup")
 
-    def census(self, refresh=False):
+    def census(self):
         from apps.vod.models import (
             M3UEpisodeRelation,
             M3UMovieRelation,
             M3USeriesRelation,
         )
 
-        self.progress(
-            "Checking complete Dispatcharr catalogue"
-            if not refresh
-            else "Checking M3U removals and refreshing tracked shows"
-        )
+        self.progress("Checking complete Dispatcharr catalogue")
+        self.census_count = 0
         series_batch = []
-        if refresh:
-            from apps.vod.tasks import refresh_series_episodes
         for rel in (
-            M3USeriesRelation.objects.select_related("series", "m3u_account")
+            M3USeriesRelation.objects.select_related("series")
+            .only("m3u_account_id", "series__uuid")
             .all()
             .iterator(chunk_size=BATCH_SIZE)
         ):
-            owned_show = (
-                self.snapshot is not None
-                and self.settings.get("media_tv_mode", "show") == "show"
-                and self.snapshot.owns(identity_for(self.plugin, rel.series, "series"))
-            )
-            identity = identity_for(self.plugin, rel.series, "series")
-            # Refresh only shows with generated output. The full census still
-            # includes every account/category and is never limited by batch size.
-            tracked = self.tracked_series(identity) if refresh else False
-            if refresh and tracked and not owned_show:
-                self.refresh_complete(rel, refresh_series_episodes)
             series_batch.append((str(rel.series.uuid), str(rel.m3u_account_id)))
             if len(series_batch) == BATCH_SIZE:
                 with self.store.db:
@@ -190,12 +175,26 @@ class Reconciliation:
             (M3UMovieRelation, "movie", "movie"),
             (M3UEpisodeRelation, "episode", "series"),
         ):
+            fields = ["m3u_account_id", "stream_id", f"{attr}__uuid"]
+            identity_path = "episode__series" if attr == "episode" else "movie"
+            fields.extend(
+                f"{identity_path}__{name}"
+                for name in ("name", "year", "tmdb_id", "imdb_id")
+            )
+            if attr == "episode":
+                fields.extend(
+                    [
+                        "episode__series__uuid",
+                        "episode__season_number",
+                        "episode__episode_number",
+                    ]
+                )
             for rel in (
                 model.objects.select_related(
                     attr,
-                    "m3u_account",
                     *(["episode__series"] if attr == "episode" else []),
                 )
+                .only(*fields)
                 .all()
                 .iterator(chunk_size=BATCH_SIZE)
             ):
@@ -231,6 +230,38 @@ class Reconciliation:
                     batch = []
         if batch:
             self._census_batch(batch)
+        self.progress(f"Checked Dispatcharr catalogue: {self.census_count:,} rows")
+
+    def refresh_tracked_series(self):
+        from apps.vod.models import M3USeriesRelation
+        from apps.vod.tasks import refresh_series_episodes
+
+        self.progress("Checking M3U removals and refreshing tracked shows")
+        refreshed = False
+        for rel in (
+            M3USeriesRelation.objects.select_related("series")
+            .only(
+                "m3u_account_id",
+                "external_series_id",
+                "last_episode_refresh",
+                "series__name",
+                "series__year",
+                "series__tmdb_id",
+                "series__imdb_id",
+            )
+            .all()
+            .iterator(chunk_size=BATCH_SIZE)
+        ):
+            identity = identity_for(self.plugin, rel.series, "series")
+            owned_show = (
+                self.snapshot is not None
+                and self.settings.get("media_tv_mode", "show") == "show"
+                and self.snapshot.owns(identity)
+            )
+            if self.tracked_series(identity) and not owned_show:
+                self.refresh_complete(rel, refresh_series_episodes)
+                refreshed = True
+        return refreshed
 
     def tracked_series(self, identity):
         # Separate probes use all columns of the existing indices. A combined
@@ -342,6 +373,12 @@ class Reconciliation:
             return False
 
     def _census_batch(self, batch):
+        previous = getattr(self, "census_count", 0)
+        self.census_count = previous + len(batch)
+        if self.census_count // 10000 > previous // 10000:
+            self.progress(
+                f"Checking Dispatcharr catalogue: {self.census_count:,} rows processed"
+            )
         with self.store.db:
             self.store.db.executemany(
                 "INSERT INTO catalogue VALUES (?,?,?,?,?,?)", batch
@@ -364,11 +401,11 @@ class Reconciliation:
                     if not name.endswith(".strm"):
                         continue
                     path = os.path.abspath(os.path.join(folder, name))
-                    if not contained(path, self.roots) or os.path.islink(path):
-                        continue
                     if self.store.db.execute(
                         "SELECT 1 FROM files WHERE path=?", (path,)
                     ).fetchone():
+                        continue
+                    if not contained(path, self.roots) or os.path.islink(path):
                         continue
                     try:
                         if os.path.getsize(path) > 8192:

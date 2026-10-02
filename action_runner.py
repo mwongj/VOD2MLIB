@@ -211,6 +211,7 @@ def supervise(directory, job_id):
         return
     if job.get("id") != job_id:
         return
+    process = None
     try:
         with open(os.devnull, "wb") as output:
             process = subprocess.Popen(
@@ -245,18 +246,22 @@ def supervise(directory, job_id):
             ),
         )
     except Exception as error:
+        if process is not None and process.poll() is None:
+            terminate(process)
         job.update(
             state="failed", message=f"Action supervisor failed ({type(error).__name__})"
         )
     finally:
-        write_json(directory / "job.json", job)
-        for path in (
-            request,
-            result_path,
-            cancel,
-            directory / f"{job_id}.progress.json",
-        ):
-            path.unlink(missing_ok=True)
+        try:
+            write_json(directory / "job.json", job)
+        finally:
+            for path in (
+                request,
+                result_path,
+                cancel,
+                directory / f"{job_id}.progress.json",
+            ):
+                path.unlink(missing_ok=True)
 
 
 def work(directory, job_id):

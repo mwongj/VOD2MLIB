@@ -32,6 +32,9 @@ class Query:
     def select_related(self, *args):
         return self
 
+    def only(self, *args):
+        return self
+
     def order_by(self, *args):
         return self
 
@@ -131,7 +134,9 @@ def library(tmp_path, monkeypatch):
     monkeypatch.setattr("plugin.create_adapter", lambda _: Adapter())
 
     def run(action="generate_movies", **updates):
-        return p._run_locked_action(action, {}, {"logger": LOG, "settings": {**settings, **updates}})
+        return p._run_locked_action(
+            action, {}, {"logger": LOG, "settings": {**settings, **updates}}
+        )
 
     return NS(
         p=p,
@@ -550,12 +555,14 @@ def test_adapter_paginated_snapshot_mixed_sources_and_specials(monkeypatch):
             "Items": items[
                 params["StartIndex"] : params["StartIndex"] + params["Limit"]
             ],
-            "TotalRecordCount": len(items),
+            "TotalRecordCount": len(items)
+            if params["EnableTotalRecordCount"] == "true"
+            else 0,
         }
 
     monkeypatch.setattr(adapter, "_get", get)
     snapshot = adapter.get_snapshot(["library"], ["movie", "series"])
-    assert len(requests) == 3
+    assert len(requests) == 4
     assert all(
         r["ParentId"] == "library"
         and r["EnableImages"] == "false"
@@ -574,18 +581,23 @@ def test_adapter_discards_incomplete_snapshot(monkeypatch, failure):
     adapter.PAGE_SIZE = 1
 
     def get(path, params):
+        if params["Limit"] == 0:
+            return {"Items": [], "TotalRecordCount": 1 if failure == "changed" else 2}
         if params["StartIndex"] == 0:
             return {
                 "Items": [{"Id": "a", "Type": "Movie", "Path": "/a.mkv"}],
                 "TotalRecordCount": 2,
             }
         if failure == "short":
-            return {"Items": [], "TotalRecordCount": 2}
+            return {"Items": [], "TotalRecordCount": 0}
         if failure == "repeated":
-            return {"Items": [{"Id": "a"}], "TotalRecordCount": 2}
+            return {"Items": [{"Id": "a"}], "TotalRecordCount": 0}
         if failure == "changed":
-            return {"Items": [], "TotalRecordCount": 1}
-        return {"Items": None, "TotalRecordCount": 2}
+            return {
+                "Items": [{"Id": "b", "Type": "Movie", "Path": "/b.mkv"}],
+                "TotalRecordCount": 0,
+            }
+        return {"Items": None, "TotalRecordCount": 0}
 
     monkeypatch.setattr(adapter, "_get", get)
     with pytest.raises(ValueError):
@@ -743,10 +755,59 @@ def test_m3u_refresh_only_shows_with_generated_output(library, monkeypatch):
     library.run("generate_series")
     library.rows["series"].append(relation(other, "series"))
     refreshed = []
-    monkeypatch.setattr(Reconciliation, "refresh_complete", lambda self, rel, _: refreshed.append(rel.series.id))
+    monkeypatch.setattr(
+        Reconciliation,
+        "refresh_complete",
+        lambda self, rel, _: refreshed.append(rel.series.id),
+    )
     result = library.run("selective_cleanup", m3u_cleanup_enabled=True)
     assert result["status"] == "ok"
     assert refreshed == [10]
+
+
+def test_m3u_reuses_complete_census_when_no_provider_refresh(library, monkeypatch):
+    library.rows["movies"].append(relation(media(1)))
+    library.run()
+    passes = []
+    census = Reconciliation.census
+
+    def counted(self):
+        passes.append(True)
+        return census(self)
+
+    monkeypatch.setattr(Reconciliation, "census", counted)
+    library.rows["movies"].clear()
+    result = library.run("selective_cleanup", m3u_cleanup_enabled=True)
+    assert passes == [True]
+    assert result["reconciliation"]["deleted"] == 1
+
+
+def test_bulk_listing_matches_separate_strm_and_file_versions(monkeypatch):
+    adapter = EmbyAdapter("http://emby", "secret")
+    versions = [
+        {
+            "Id": "strm",
+            "Type": "Movie",
+            "Name": "Movie",
+            "ProviderIds": {"Tmdb": "1"},
+            "Path": "/movie.strm",
+        },
+        {
+            "Id": "file",
+            "Type": "Movie",
+            "Name": "Movie",
+            "ProviderIds": {"Tmdb": "1"},
+            "Path": "/movie.mkv",
+        },
+    ]
+
+    def get(path, params):
+        return {"Items": versions if params["Limit"] else [], "TotalRecordCount": 2}
+
+    monkeypatch.setattr(adapter, "_get", get)
+    snapshot = adapter.get_snapshot([], ["movie"])
+    assert len(snapshot.media) == 1
+    assert snapshot.owns(Identity("movie", "Movie", tmdb="1"))
 
 
 @pytest.mark.parametrize(
