@@ -1,6 +1,6 @@
 {
   "name": "VOD to Media Library",
-  "version": "1.19.0-rc.6",
+  "version": "1.19.0-rc.7",
   "description": "VOD → media library bridge. Generates .strm + NFO files from Dispatcharr's VOD catalogue, with optional cron-driven auto-rescan that picks up newly-added episodes.",
   "author": "R3XCHRIS",
   "license": "MIT",
@@ -307,28 +307,11 @@
       "help_text": "Emby API key used to read libraries and media metadata. Create one in the Emby dashboard under API Keys."
     },
     {
-      "id": "media_library_scope",
-      "label": "Library scope",
-      "type": "select",
-      "default": "all",
-      "options": [
-        {
-          "value": "all",
-          "label": "All libraries"
-        },
-        {
-          "value": "selected",
-          "label": "Selected libraries"
-        }
-      ],
-      "help_text": "All libraries checks real media across the server. Selected libraries checks only the library IDs entered below. STRM-only entries do not count as owned media."
-    },
-    {
       "id": "media_library_ids",
-      "label": "Selected library IDs",
+      "label": "Library names or IDs",
       "type": "string",
       "default": "",
-      "help_text": "Comma-separated library IDs, used only with Selected libraries. Run List media libraries to discover their names and IDs."
+      "help_text": "Required comma-separated library names or IDs, for example Movies, TV Shows. Names are resolved on every run, so recreated libraries keep working under the same name. Run List media libraries to discover names/IDs; omit generated VOD/STRM libraries. Empty, missing or ambiguous selections stop actions; use IDs for duplicate names."
     },
     {
       "id": "media_tv_mode",

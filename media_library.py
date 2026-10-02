@@ -86,6 +86,37 @@ class Snapshot:
         return position is not None and any(position in x.episodes for x in matches)
 
 
+class LibrarySelectionError(ValueError):
+    """Invalid explicit selection, rather than a transient server failure."""
+
+
+def resolve_library_ids(libraries, selections):
+    """Resolve names afresh; reject missing or ambiguous names before file changes."""
+    if not selections:
+        raise LibrarySelectionError("Enter at least one library name or ID")
+    by_id, by_name = {}, {}
+    for library in libraries:
+        identifier = str(library["Id"])
+        by_id[identifier] = identifier
+        by_name.setdefault(library["Name"].strip().casefold(), set()).add(identifier)
+    resolved = []
+    for selection in selections:
+        selection = selection.strip()
+        if not selection:
+            raise LibrarySelectionError("Enter at least one library name or ID")
+        if selection in by_id:
+            identifier = by_id[selection]
+        else:
+            matches = by_name.get(selection.casefold(), set())
+            if len(matches) != 1:
+                reason = "ambiguous; use its ID" if matches else "not found"
+                raise LibrarySelectionError(f"Library '{selection}' is {reason}")
+            identifier = next(iter(matches))
+        if identifier not in resolved:
+            resolved.append(identifier)
+    return resolved
+
+
 class MediaLibraryAdapter(ABC):
     @abstractmethod
     def list_libraries(self):
@@ -205,8 +236,10 @@ class EmbyAdapter(MediaLibraryAdapter):
         )
 
     def get_snapshot(self, library_ids, media_types):
+        if not library_ids or any(not str(library).strip() for library in library_ids):
+            raise ValueError("At least one explicit Emby library ID is required")
         movies, series, episodes = [], {}, {}
-        for library in library_ids or [None]:
+        for library in dict.fromkeys(library_ids):
             params = {
                 "Recursive": "true",
                 "IncludeItemTypes": "Movie,Series,Episode",
@@ -215,8 +248,7 @@ class EmbyAdapter(MediaLibraryAdapter):
                 "CollapseBoxSetItems": "false",
                 "IsMissing": "false",
             }
-            if library:
-                params["ParentId"] = library
+            params["ParentId"] = library
             for item in self._items(params):
                 kind = item.get("Type")
                 if kind == "Series":

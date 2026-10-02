@@ -35,6 +35,13 @@ class Query:
     def only(self, *args):
         return self
 
+    def values_list(self, *fields):
+        def resolve(row, field):
+            for part in field.split("__"):
+                row = getattr(row, part)
+            return row
+        return Query([tuple(resolve(row, field) for field in fields) for row in self.rows])
+
     def order_by(self, *args):
         return self
 
@@ -113,6 +120,7 @@ def library(tmp_path, monkeypatch):
         root_folder=str(tmp_path / "Movies"),
         series_root_folder=str(tmp_path / "Series"),
         dispatcharr_url="http://dispatcharr.test:9191",
+        media_library_ids="library",
         batch_size="all",
         series_batch_size="all",
         generate_nfo=True,
@@ -128,7 +136,11 @@ def library(tmp_path, monkeypatch):
             return state["snapshot"]
 
         def list_libraries(self):
-            return [{"Id": "lib", "Name": "Movies"}]
+            return [
+                {"Id": "library", "Name": "Movies"},
+                {"Id": "a", "Name": "TV Shows"},
+                {"Id": "b", "Name": "Recorded TV"},
+            ]
 
     monkeypatch.setattr("reconciliation.create_adapter", lambda _: Adapter())
     monkeypatch.setattr("plugin.create_adapter", lambda _: Adapter())
@@ -228,14 +240,12 @@ def test_selected_libraries_and_shared_full_rescan_snapshot(library):
     result = library.run(
         "rescan_all",
         media_library_enabled=True,
-        media_library_scope="selected",
         media_library_ids="a, b",
     )
     assert result["status"] == "ok"
     assert library.state["requests"] == [(["a", "b"], ["movie", "series"])]
     result = library.run(
         media_library_enabled=True,
-        media_library_scope="selected",
         media_library_ids="",
         media_server_failure="stop",
     )
@@ -601,7 +611,7 @@ def test_adapter_discards_incomplete_snapshot(monkeypatch, failure):
 
     monkeypatch.setattr(adapter, "_get", get)
     with pytest.raises(ValueError):
-        adapter.get_snapshot([], ["movie"])
+        adapter.get_snapshot(["library"], ["movie"])
 
 
 def test_adapter_http_header_and_timeout(monkeypatch):
@@ -805,7 +815,7 @@ def test_bulk_listing_matches_separate_strm_and_file_versions(monkeypatch):
         return {"Items": versions if params["Limit"] else [], "TotalRecordCount": 2}
 
     monkeypatch.setattr(adapter, "_get", get)
-    snapshot = adapter.get_snapshot([], ["movie"])
+    snapshot = adapter.get_snapshot(["library"], ["movie"])
     assert len(snapshot.media) == 1
     assert snapshot.owns(Identity("movie", "Movie", tmdb="1"))
 
@@ -1064,3 +1074,71 @@ def test_inventory_failure_cancels_bounded_workers(library, monkeypatch):
     result = library.run("generate_series", generate_series_nfo=False)
     assert result["status"] == "error"
     assert "Disk full" in result["message"]
+
+
+@pytest.mark.parametrize("policy", ["continue", "stop"])
+@pytest.mark.parametrize("selection", ["", " , ", "Missing", "stale-id"])
+def test_explicit_library_selection_required_before_file_changes(library, policy, selection):
+    library.rows["movies"].append(relation(media(1)))
+    result = library.run(
+        media_library_enabled=True, media_library_ids=selection,
+        media_library_scope="all", media_server_failure=policy,
+    )
+    assert result["status"] == "error"
+    assert library.state["requests"] == []
+    assert not list(library.tmp.rglob("*.strm"))
+
+
+def test_library_names_normalized_and_resolved_each_action(library, monkeypatch):
+    from media_library import LibrarySelectionError, resolve_library_ids
+    selections = ["Movies", "tv shows"]
+    initial = [{"Id": "1", "Name": " Movies "}, {"Id": "2", "Name": "TV Shows"}]
+    assert resolve_library_ids(initial, selections) == ["1", "2"]
+    recreated = [{"Id": "3", "Name": "MOVIES"}, {"Id": "4", "Name": "TV SHOWS"}]
+    assert resolve_library_ids(recreated, selections) == ["3", "4"]
+    assert resolve_library_ids(recreated, [" 3 ", " movies "]) == ["3"]
+    duplicates = recreated + [{"Id": "5", "Name": "Movies"}]
+    with pytest.raises(LibrarySelectionError, match="ambiguous"):
+        resolve_library_ids(duplicates, ["movies"])
+    assert resolve_library_ids(duplicates, ["3"]) == ["3"]
+    result = library.run(
+        media_library_enabled=True, media_library_ids="  mOViEs , TV SHOWS, library  ",
+    )
+    assert result["status"] == "ok"
+    assert library.state["requests"] == [(["library", "a"], ["movie", "series"])]
+    assert "media_library_scope" not in {field["id"] for field in Plugin.fields}
+
+
+def test_adapter_never_falls_back_to_global_query(monkeypatch):
+    adapter = EmbyAdapter("http://emby", "secret")
+    monkeypatch.setattr(adapter, "_get", lambda *_: pytest.fail("No global requests"))
+    with pytest.raises(ValueError, match="explicit"):
+        adapter.get_snapshot([], ["movie"])
+
+
+def test_census_preserves_positions_sources_and_account_membership(library, monkeypatch):
+    from reconciliation import identity_for, source_for
+    show = media(10, name="Show (2000)")
+    library.rows["series"].append(relation(show, "series"))
+    episodes = [relation(media(n, series=show, season_number=0, episode_number=n), "episode")
+                for n in (1, 2)]
+    orphan = relation(media(3, series=show, season_number=1, episode_number=3), "episode")
+    orphan.m3u_account_id = 2
+    library.rows["episodes"].extend(episodes + [orphan])
+    rec = Reconciliation(library.p, library.settings, LOG, library.tmp / "census")
+    calls = []
+    clean = library.p._extract_clean_name_and_year
+    monkeypatch.setattr(library.p, "_extract_clean_name_and_year",
+                        lambda name: (calls.append(name), clean(name))[1])
+    try:
+        rec.census()
+        assert calls == [show.name]
+        rows = list(rec.store.db.execute("SELECT * FROM catalogue ORDER BY episode"))
+        assert len(rows) == 2
+        for row, episode in zip(rows, episodes):
+            assert row["uuid"] == episode.episode.uuid
+            assert row["source"] == source_for(episode, "episode")
+            assert (row["season"], row["episode"]) == (0, episode.episode.episode_number)
+            assert Identity(**json.loads(row["identity"])) == identity_for(library.p, show, "series")
+    finally:
+        rec.store.close()

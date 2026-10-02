@@ -1,7 +1,7 @@
 """
 VOD to Media Library — Dispatcharr VOD .strm Generator Plugin
 (slug: vod2mlib)
-v1.19.0-rc.6 — optional Emby reconciliation and persistent SQLite ownership tracking.
+v1.19.0-rc.7 — optional Emby reconciliation and persistent SQLite ownership tracking.
 
 MIT License
 Copyright (c) 2025-2026 shedunraid (original author)
@@ -36,7 +36,7 @@ class Plugin:
     """Generate .strm files for VOD movies from Dispatcharr."""
 
     name = "VOD to Media Library"
-    version = "1.19.0-rc.6"
+    version = "1.19.0-rc.7"
     help_url = "https://github.com/R3XCHRIS/VOD2MLIB#readme"
     description = (
         "Convert Dispatcharr VODs into media-server-friendly .strm files, with "
@@ -379,20 +379,14 @@ class Plugin:
       'default': '',
       'help_text': 'Emby API key used to read libraries and media metadata. Create one in the Emby dashboard '
                    'under API Keys.'},
-     {'id': 'media_library_scope',
-      'label': 'Library scope',
-      'type': 'select',
-      'default': 'all',
-      'options': [{'value': 'all', 'label': 'All libraries'},
-                  {'value': 'selected', 'label': 'Selected libraries'}],
-      'help_text': 'All libraries checks real media across the server. Selected libraries checks only the '
-                   'library IDs entered below. STRM-only entries do not count as owned media.'},
      {'id': 'media_library_ids',
-      'label': 'Selected library IDs',
+      'label': 'Library names or IDs',
       'type': 'string',
       'default': '',
-      'help_text': 'Comma-separated library IDs, used only with Selected libraries. Run List media libraries to '
-                   'discover their names and IDs.'},
+      'help_text': 'Required comma-separated library names or IDs, for example Movies, TV Shows. Names are '
+                   'resolved on every run, so recreated libraries keep working under the same name. Run List '
+                   'media libraries to discover names/IDs; omit generated VOD/STRM libraries. Empty, missing '
+                   'or ambiguous selections stop actions; use IDs for duplicate names.'},
      {'id': 'media_tv_mode',
       'label': 'TV handling',
       'type': 'select',

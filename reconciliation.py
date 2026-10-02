@@ -6,29 +6,43 @@ import re
 import sqlite3
 import threading
 from dataclasses import asdict
+from functools import lru_cache
 from pathlib import Path
 from queue import Empty, Full, Queue
 from urllib.parse import parse_qs, urlparse
 
 try:
     from .inventory import BATCH_SIZE, InventoryStore, contained, strm_contents
-    from .media_library import Identity, create_adapter
+    from .media_library import (
+        Identity,
+        LibrarySelectionError,
+        create_adapter,
+        resolve_library_ids,
+    )
 except ImportError:
     from inventory import BATCH_SIZE, InventoryStore, contained, strm_contents
-    from media_library import Identity, create_adapter
+    from media_library import (
+        Identity,
+        LibrarySelectionError,
+        create_adapter,
+        resolve_library_ids,
+    )
+
+
+def identity_from_fields(plugin, kind, name, year, tmdb, imdb):
+    title, title_year = plugin._extract_clean_name_and_year(name or "")
+    title, year = plugin._strip_redundant_trailing_year(title, year or title_year)
+    return Identity(
+        kind, title, year,
+        str(tmdb or "").strip().lower(),
+        str(imdb or "").strip().lower(),
+    )
 
 
 def identity_for(plugin, obj, kind):
-    title, title_year = plugin._extract_clean_name_and_year(obj.name or "")
-    title, year = plugin._strip_redundant_trailing_year(
-        title, getattr(obj, "year", None) or title_year
-    )
-    return Identity(
-        kind,
-        title,
-        year,
-        str(getattr(obj, "tmdb_id", "") or "").strip().lower(),
-        str(getattr(obj, "imdb_id", "") or "").strip().lower(),
+    return identity_from_fields(
+        plugin, kind, obj.name, getattr(obj, "year", None),
+        getattr(obj, "tmdb_id", ""), getattr(obj, "imdb_id", ""),
     )
 
 
@@ -84,29 +98,30 @@ class Reconciliation:
 
     def prepare(self, action):
         if self.settings.get("media_library_enabled", False):
+            libraries = list(dict.fromkeys(
+                s.strip() for s in self.settings.get("media_library_ids", "").split(",")
+                if s.strip()
+            ))
+            # Configuration errors must not be treated as a transient server outage.
+            if not libraries:
+                raise ValueError(
+                    "Enter library names or IDs before enabling media-library integration; "
+                    "run List media libraries to find them"
+                )
             try:
-                libraries = [
-                    s.strip()
-                    for s in self.settings.get("media_library_ids", "").split(",")
-                    if s.strip()
-                ]
-                if (
-                    self.settings.get("media_library_scope", "all") == "selected"
-                    and not libraries
-                ):
-                    raise ValueError("Selected library scope requires library IDs")
                 self.progress("Fetching Emby snapshot")
                 adapter = create_adapter(self.settings)
                 adapter.progress = self.progress
+                libraries = resolve_library_ids(adapter.list_libraries(), libraries)
                 self.snapshot = adapter.get_snapshot(
-                    libraries
-                    if self.settings.get("media_library_scope", "all") == "selected"
-                    else [],
+                    libraries,
                     ["movie", "series"],
                 )
                 self.snapshot.clean_title = lambda title: (
                     self.plugin._extract_clean_name_and_year(title)[0]
                 )
+            except LibrarySelectionError:
+                raise
             except Exception as error:
                 self.snapshot = None
                 if self.settings.get("media_server_failure", "continue") == "stop":
@@ -151,13 +166,11 @@ class Reconciliation:
         self.progress("Checking complete Dispatcharr catalogue")
         self.census_count = 0
         series_batch = []
-        for rel in (
-            M3USeriesRelation.objects.select_related("series")
-            .only("m3u_account_id", "series__uuid")
-            .all()
+        for account, uuid in (
+            M3USeriesRelation.objects.values_list("m3u_account_id", "series__uuid")
             .iterator(chunk_size=BATCH_SIZE)
         ):
-            series_batch.append((str(rel.series.uuid), str(rel.m3u_account_id)))
+            series_batch.append((str(uuid), str(account)))
             if len(series_batch) == BATCH_SIZE:
                 with self.store.db:
                     self.store.db.executemany(
@@ -169,7 +182,22 @@ class Reconciliation:
                 self.store.db.executemany(
                     "INSERT OR IGNORE INTO live_series VALUES (?,?)", series_batch
                 )
+        # Cache only this census: bounded memory, no stale data across actions.
+        @lru_cache(maxsize=8192)
+        def live_show(uuid, account):
+            return bool(self.store.db.execute(
+                "SELECT 1 FROM live_series WHERE uuid=? AND account=?",
+                (uuid, account),
+            ).fetchone())
+
+        @lru_cache(maxsize=8192)
+        def identity_json(kind, name, year, tmdb, imdb):
+            return json.dumps(asdict(identity_from_fields(
+                self.plugin, kind, name, year, tmdb, imdb,
+            )))
+
         # Full catalogue deliberately ignores native category eligibility and batches.
+        # Project tuples so Django never constructs hundreds of thousands of models.
         batch = []
         for model, attr, kind in (
             (M3UMovieRelation, "movie", "movie"),
@@ -182,49 +210,24 @@ class Reconciliation:
                 for name in ("name", "year", "tmdb_id", "imdb_id")
             )
             if attr == "episode":
-                fields.extend(
-                    [
-                        "episode__series__uuid",
-                        "episode__season_number",
-                        "episode__episode_number",
-                    ]
-                )
-            for rel in (
-                model.objects.select_related(
-                    attr,
-                    *(["episode__series"] if attr == "episode" else []),
-                )
-                .only(*fields)
-                .all()
-                .iterator(chunk_size=BATCH_SIZE)
-            ):
-                obj = getattr(rel, attr)
-                if (
-                    attr == "episode"
-                    and not self.store.db.execute(
-                        "SELECT 1 FROM live_series WHERE uuid=? AND account=?",
-                        (str(obj.series.uuid), str(rel.m3u_account_id)),
-                    ).fetchone()
-                ):
+                fields.extend([
+                    "episode__series__uuid", "episode__season_number",
+                    "episode__episode_number",
+                ])
+            for row in model.objects.values_list(*fields).iterator(chunk_size=BATCH_SIZE):
+                account, stream, uuid, name, year, tmdb, imdb = row[:7]
+                account = str(account)
+                if attr == "episode" and not live_show(str(row[7]), account):
                     continue
-                identity = identity_for(
-                    self.plugin, obj.series if attr == "episode" else obj, kind
+                position = row[8:10] if attr == "episode" else (None, None)
+                source = (
+                    json.dumps([attr, account, str(stream)])
+                    if row[0] is not None and stream is not None else ""
                 )
-                position = (
-                    (obj.season_number, obj.episode_number)
-                    if attr == "episode"
-                    else (None, None)
-                )
-                source = source_for(rel, "episode" if attr == "episode" else "movie")
-                batch.append(
-                    (
-                        str(obj.uuid),
-                        str(rel.stream_id),
-                        json.dumps(asdict(identity)),
-                        source,
-                        *position,
-                    )
-                )
+                batch.append((
+                    str(uuid), str(stream),
+                    identity_json(kind, name, year, tmdb, imdb), source, *position,
+                ))
                 if len(batch) == BATCH_SIZE:
                     self._census_batch(batch)
                     batch = []

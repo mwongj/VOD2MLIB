@@ -22,9 +22,9 @@
 
 ---
 
-## Media-library reconciliation (1.19.0-rc.6)
+## Media-library reconciliation (1.19.0-rc.7)
 
-Optional integration with one Emby server prevents generated STRMs from duplicating real media. Integration is disabled by default. Configure the server URL and API key, enable integration, then use **List media libraries** to find IDs if you want to limit checks to selected libraries. The default checks all libraries. STRM-only, remote and virtual Emby entries do not count as owned; a movie with both a real file and a STRM does.
+Optional integration with one Emby server prevents generated STRMs from duplicating real media. Integration is disabled by default. Configure the server URL and API key, enable integration, then use **List media libraries** to find names/IDs and enter the real-media libraries you want checked. Explicit library names or IDs are required; there is no all-libraries option. Leave generated VOD/STRM libraries out to avoid fetching and discarding their contents. Empty, missing or ambiguous selections stop actions even with the continue-on-server-failure policy. Existing installations and scheduled snapshots must be updated with explicit names or IDs. Names are resolved on every run (case-insensitive exact matching), so a recreated library with the same name uses its new ID. Duplicate names require an ID. STRM-only, remote and virtual Emby entries do not count as owned; a movie with both a real file and a STRM does.
 
 Movies and shows match separately, first by TMDB or IMDb ID. When comparable IDs are unavailable, an exact cleaned title and known matching year can match. Conflicting IDs, unknown years and fuzzy titles are retained. A show counts as owned only when Emby has actual non-STRM episodes. **Skip entire owned show** is the default; **Fill missing episodes** compares season/episode positions, including specials and multi-episode files. Uncertain positions are retained in missing-episode mode.
 
@@ -271,3 +271,5 @@ Emby snapshots fetch up to 20,000 items per page with a 30-second request timeou
 Bulk listings request provider IDs and paths rather than playback MediaSources. The global `/Items` endpoint returns file versions as separate records; STRM versions are ignored by their paths. The first page and a final count-only request validate the total; intermediate pages disable repeated total counts. Each page must make progress, contain unique IDs, and stay within the initial count. The complete snapshot remains unusable until the final check succeeds.
 
 The complete Dispatcharr catalogue census projects only identity, source, UUID, and episode-position columns. It joins media records without unrelated account metadata. Cleanup reuses the census unless a tracked provider show was refreshed, and status reports processed row counts. Existing tracked paths skip legacy-adoption checks; deletion still verifies ownership and containment at the point of removal.
+
+Catalogue reads stream projected tuples rather than constructing Django models for each row. Action-local caches hold at most 8,192 identities and show/account membership checks; repeated episodes reuse cleaned metadata without retaining the complete catalogue in memory. SQLite still writes in transactions of up to 1,000 rows.
