@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Active metadata filters archive confirmed rejected NFO-only movie/series folders, including legacy or Emby-written metadata, outside output roots with a recovery manifest. Archives preserve metadata; STRMs, symlinks, unrelated files and passing sources protect folders.
+- Handle enabling filters after unfiltered generation or STRM-only cleanup, even with NFO generation disabled. Preview models planned STRM/NFO removal and reports matching archive candidates.
+- Add native lookup/archive telemetry and action-result counts. Complete native lookups precede filter changes; copy verification and inventory protections preserve retryability.
+- Group NFO controls under a UI heading and description; explain how plugin NFO writing, Emby ownership integration and deletion scope interact. Preserve saved settings and compatible defaults.
+
 ## v1.20.1 ? one saved configuration and Save-driven scheduling
 
 - Manual and scheduled actions use current saved settings and the same defaults at run start.
