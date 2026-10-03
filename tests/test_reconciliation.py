@@ -20,6 +20,87 @@ from reconciliation import Reconciliation
 LOG = logging.getLogger(__name__)
 
 
+def test_series_generation_reports_work_and_avoids_repeated_directory_setup(library, monkeypatch):
+    show = media(10)
+    library.rows['series'].append(relation(show, 'series'))
+    for n in range(1, 5):
+        library.rows['episodes'].append(relation(
+            media(n, series=show, season_number=1, episode_number=n), 'episode'))
+    directories, live = [], []
+    original = os.makedirs
+    def mkdir(path, *args, **kwargs):
+        if Path(path).name == 'Season 01':
+            directories.append(str(path))
+        return original(path, *args, **kwargs)
+    monkeypatch.setattr(os, 'makedirs', mkdir)
+    monkeypatch.setattr(library.p, '_progress', live.append, raising=False)
+    result = library.run('generate_series', refresh_existing=True)
+    assert result['errors'] == 0 and result['episodes_created'] == 4
+    assert len(directories) == 1
+    report = result['reconciliation']
+    assert report['series_completed'] == 1 and report['episodes_evaluated'] == 4
+    timings = report['timings']
+    assert timings['provider_refresh']['calls'] == 1
+    assert timings['series_files']['items'] == 4
+    assert timings['strm_write']['items'] == 4
+    assert timings['episode_nfo']['items'] == 4
+    assert timings['inventory_record']['items'] == 4
+    assert timings['inventory_checkpoint']['items'] == 4
+    assert timings['series_files']['cpu_clock'] == 'thread'
+    assert '1 completed' in live[-1] and '4 episodes evaluated' in live[-1]
+    # Cached episodes still refresh their provider, but create no output or directories.
+    directories.clear()
+    result = library.run('generate_series', refresh_existing=True)
+    assert result['episodes_created'] == 0 and not directories
+    assert result['reconciliation']['generation_unchanged'] == 4
+    assert 'strm_write' not in result['reconciliation']['timings']
+
+
+def test_worker_timing_uses_thread_cpu_and_live_snapshots_are_independent(library, monkeypatch):
+    rec = Reconciliation(library.p, library.settings, LOG, library.tmp / 'timing-worker')
+    try:
+        wall, cpu = iter([10.0, 12.0]), iter([2.0, 2.5])
+        monkeypatch.setattr('reconciliation.time.perf_counter', lambda: next(wall))
+        monkeypatch.setattr('reconciliation.time.thread_time', lambda: next(cpu))
+        monkeypatch.setattr('reconciliation.time.process_time', lambda: pytest.fail('Process CPU double-counts workers'))
+        with rec.measure('worker', 1, worker=True):
+            pass
+        live = rec.telemetry()
+        assert live['timings']['worker']['cpu_seconds'] == 0.5
+        assert live['timings']['worker']['cpu_clock'] == 'thread'
+        live['timings']['worker']['calls'] = 999
+        assert rec.report['timings']['worker']['calls'] == 1
+    finally:
+        rec.store.close()
+
+
+def test_provider_sql_wrapper_records_counts_without_query_data(library, monkeypatch):
+    from contextlib import contextmanager
+    rec = Reconciliation(library.p, library.settings, LOG, library.tmp / 'sql-timing')
+    wrappers = []
+    @contextmanager
+    def execute_wrapper(wrapper):
+        wrappers.append(wrapper)
+        try:
+            yield
+        finally:
+            wrappers.pop()
+    monkeypatch.setitem(sys.modules, 'django.conf', NS(settings=NS(configured=True)))
+    monkeypatch.setitem(sys.modules, 'django.db', NS(connection=NS(execute_wrapper=execute_wrapper)))
+    try:
+        with rec.provider_refresh():
+            assert wrappers[0](lambda *args: 'result', 'private SQL', ['secret'], False, {}) == 'result'
+        assert not wrappers
+        assert rec.report['timings']['provider_sql']['calls'] == 1
+        assert 'secret' not in json.dumps(rec.telemetry())
+        with pytest.raises(ValueError):
+            with rec.provider_refresh():
+                raise ValueError('failed')
+        assert not wrappers and rec.report['timings']['provider_refresh']['calls'] == 2
+    finally:
+        rec.store.close()
+
+
 class Query:
     def __init__(self, rows):
         self.rows = rows

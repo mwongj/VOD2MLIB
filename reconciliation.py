@@ -100,6 +100,8 @@ class Reconciliation:
             "generation_unchanged": 0,
             "generation_candidates": 0,
             "generation_deduped": 0,
+            "series_completed": 0,
+            "episodes_evaluated": 0,
             "source_presence_requested": 0,
             "source_presence_found": 0,
             "source_presence_queries": 0,
@@ -116,8 +118,9 @@ class Reconciliation:
         self.inventory_write_failed = False
 
     @contextmanager
-    def measure(self, name, items=0):
-        wall, cpu = time.perf_counter(), time.process_time()
+    def measure(self, name, items=0, worker=False):
+        cpu_clock = time.thread_time if worker else time.process_time
+        wall, cpu = time.perf_counter(), cpu_clock()
         try:
             yield
         finally:
@@ -126,9 +129,38 @@ class Reconciliation:
                     "wall_seconds": 0.0, "cpu_seconds": 0.0, "calls": 0, "items": 0,
                 })
                 timing["wall_seconds"] += time.perf_counter() - wall
-                timing["cpu_seconds"] += time.process_time() - cpu
+                timing["cpu_seconds"] += cpu_clock() - cpu
                 timing["calls"] += 1
                 timing["items"] += items
+                if worker:
+                    timing['cpu_clock'] = 'thread'
+
+    def telemetry(self):
+        # Copy under the same lock used by workers; never publish URLs or settings.
+        with self.counter_lock:
+            return {
+                'timings': {k: dict(v) for k, v in self.report['timings'].items()},
+                'series_completed': self.report['series_completed'],
+                'episodes_evaluated': self.report['episodes_evaluated'],
+            }
+
+    @contextmanager
+    def provider_refresh(self):
+        # Django wrappers are connection/thread-local. No SQL or parameters are logged.
+        from contextlib import nullcontext
+        wrapper = nullcontext()
+        try:
+            from django.conf import settings
+            if settings.configured:
+                from django.db import connection
+                def execute(execute, sql, params, many, context):
+                    with self.measure('provider_sql', 1, worker=True):
+                        return execute(sql, params, many, context)
+                wrapper = connection.execute_wrapper(execute)
+        except ImportError:
+            pass
+        with self.measure('provider_refresh', 1, worker=True), wrapper:
+            yield
 
     def finish(self):
         timings = self.report["timings"]
@@ -855,7 +887,8 @@ class Reconciliation:
                 break
         if records:
             try:
-                self.store.record_many(records)
+                with self.measure('inventory_record', len(records)):
+                    self.store.record_many(records)
             except Exception:
                 # Never checkpoint output decisions whose ownership write failed.
                 self.inventory_write_failed = True
@@ -868,7 +901,7 @@ class Reconciliation:
             except Empty:
                 break
         if decisions and not self.inventory_write_failed:
-            with self.store.db:
+            with self.measure('inventory_checkpoint', len(decisions)), self.store.db:
                 self.store.db.executemany(
                     'INSERT OR REPLACE INTO generation_entries VALUES (?,?,?,?)', decisions,
                 )

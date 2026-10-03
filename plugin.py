@@ -1,7 +1,7 @@
 """
 VOD to Media Library — Dispatcharr VOD .strm Generator Plugin
 (slug: vod2mlib)
-v1.20.0-rc.1 — independent movie and series metadata filters.
+v1.20.0-rc.2 — independent movie and series metadata filters.
 
 MIT License
 Copyright (c) 2025-2026 shedunraid (original author)
@@ -10,6 +10,9 @@ Upstream:   https://github.com/shedunraid/VOD2MLIB
 This fork:  https://github.com/R3XCHRIS/VOD2MLIB
 """
 import os
+import time
+import hashlib
+from contextlib import nullcontext
 from pathlib import Path
 import re
 from enum import Enum
@@ -38,7 +41,7 @@ class Plugin:
     """Generate .strm files for VOD movies from Dispatcharr."""
 
     name = "VOD to Media Library"
-    version = "1.20.0-rc.1"
+    version = "1.20.0-rc.2"
     help_url = "https://github.com/R3XCHRIS/VOD2MLIB#readme"
     description = (
         "Convert Dispatcharr VODs into media-server-friendly .strm files, with "
@@ -1295,7 +1298,22 @@ class Plugin:
         errors = 0
         series_created = 0
         series_uptodate = 0
+        episodes_evaluated = 0
         failures = []
+
+        rec = getattr(self, '_reconciliation', None)
+        last_progress = 0.0
+        def progress(force=False):
+            nonlocal last_progress
+            now = time.monotonic()
+            if rec and (force or now - last_progress >= 2):
+                with rec.counter_lock:
+                    rec.report['series_completed'] = idx
+                    rec.report['episodes_evaluated'] = episodes_evaluated
+                rec.progress(f"Generating series: {idx:,} completed, {len(futures)} active; "
+                    f"{episodes_evaluated:,} episodes evaluated, {created_strm:,} new, "
+                    f"{refreshed_strm:,} refreshed; {errors:,} errors")
+                last_progress = now
 
         logger.info("Processing series with %d parallel workers", self.MAX_WORKERS)
         with ThreadPoolExecutor(max_workers=self.MAX_WORKERS) as executor:
@@ -1303,6 +1321,7 @@ class Plugin:
                 futures = {}
                 exhausted = False
                 idx = 0
+                progress(force=True)
                 while futures or not exhausted:
                     while not exhausted and len(futures) < self.MAX_WORKERS:
                         try: rel = next(to_process)
@@ -1315,6 +1334,7 @@ class Plugin:
                     if not futures: break
                     completed, _ = wait(futures, timeout=0.1, return_when=FIRST_COMPLETED)
                     self._drain_inventory()
+                    progress()
                     for future in completed:
                         rel = futures.pop(future)
                         idx += 1
@@ -1331,10 +1351,12 @@ class Plugin:
                             created_strm += result["episodes"]
                             refreshed_strm += result.get("refreshed", 0)
                         created_nfo += result.get("nfo_files", 0)
+                        episodes_evaluated += result.get('evaluated_episodes', 0)
                         if "error" in result:
                             errors += 1
                             failures.append(f"{result.get('series_name', '?')}: {result['error']}")
                         logger.info("[%d] %s", idx, result["message"])
+                progress(force=True)
             except BaseException:
                 rec = getattr(self, '_reconciliation', None)
                 if rec: rec.cancelled.set()
@@ -1398,6 +1420,7 @@ class Plugin:
         from apps.vod.models import M3UEpisodeRelation
         from apps.vod.tasks import refresh_series_episodes
 
+        rec = getattr(self, '_reconciliation', None)
         series = series_rel.series
         if self._owned(series, "series"):
             return {"created": False, "episodes": 0, "nfo_files": 0, "message": "Excluded owned series"}
@@ -1411,25 +1434,27 @@ class Plugin:
             should_refetch = refresh_existing or not custom_props.get('episodes_fetched', False)
             if should_refetch:
                 try:
-                    refresh_series_episodes(
-                        account=series_rel.m3u_account,
-                        series=series_rel.series,
-                        external_series_id=series_rel.external_series_id,
-                    )
+                    with rec.provider_refresh() if rec else nullcontext():
+                        refresh_series_episodes(
+                            account=series_rel.m3u_account,
+                            series=series_rel.series,
+                            external_series_id=series_rel.external_series_id,
+                        )
                 except Exception as fetch_err:
                     logger.warning("refresh_series_episodes failed for %s: %s", series_name, fetch_err)
 
             # `id` is a deterministic tiebreaker: without it the winner among
             # duplicate relations for one episode varies run to run, so the
             # same .strm would flip between provider URLs on every rescan.
-            episode_rels = list(
-                M3UEpisodeRelation.objects.filter(
-                    m3u_account=series_rel.m3u_account,
-                    episode__series=series,
+            with rec.measure('episode_load', 1, worker=True) if rec else nullcontext():
+                episode_rels = list(
+                    M3UEpisodeRelation.objects.filter(
+                        m3u_account=series_rel.m3u_account,
+                        episode__series=series,
+                    )
+                    .select_related('episode')
+                    .order_by('episode__season_number', 'episode__episode_number', 'id')
                 )
-                .select_related('episode')
-                .order_by('episode__season_number', 'episode__episode_number', 'id')
-            )
 
             # One Episode can be reached by several relations. Every relation
             # resolves to the same filename (the name comes from the Episode),
@@ -1456,7 +1481,8 @@ class Plugin:
             episode_count = len(episodes)
             rec = getattr(self, '_reconciliation', None)
             episode_cache_kind = f'episode:{series_rel.m3u_account_id}:{series.uuid}'
-            episode_cache = rec.episode_cache(episode_cache_kind) if rec else {}
+            with rec.measure('episode_cache_read', 1, worker=True) if rec else nullcontext():
+                episode_cache = rec.episode_cache(episode_cache_kind) if rec else {}
 
             if episode_count == 0:
                 return {
@@ -1468,88 +1494,93 @@ class Plugin:
                     "message": f"{series_name} - No episodes found",
                 }
 
-            if not contained(series_folder, [series_root]):
-                raise ValueError("Series folder resolves outside configured root")
-            os.makedirs(series_folder, exist_ok=True)
+            with rec.measure('series_files', episode_count, worker=True) if rec else nullcontext():
+                if not contained(series_folder, [series_root]):
+                    raise ValueError("Series folder resolves outside configured root")
+                os.makedirs(series_folder, exist_ok=True)
 
-            new_episodes = 0
-            refreshed_episodes = 0
-            unchanged_episodes = 0
-            new_nfo = 0
+                new_episodes = 0
+                refreshed_episodes = 0
+                unchanged_episodes = 0
+                new_nfo = 0
 
-            shared_nfos = {}
-            if generate_nfo:
-                tvshow_nfo_path = os.path.join(series_folder, "tvshow.nfo")
-                if not os.path.lexists(tvshow_nfo_path):
-                    category_name = series_rel.category.name if series_rel.category else ""
-                    tvshow_content = self._generate_tvshow_nfo(series, category_name, nfo_omit_title)
-                    with open(tvshow_nfo_path, 'w', encoding='utf-8') as f:
-                        f.write(tvshow_content)
-                    new_nfo += 1
-                try:
-                    if Path(tvshow_nfo_path).read_text(encoding="utf-8") == self._generate_tvshow_nfo(series, cat_name, nfo_omit_title):
-                        shared_nfos[tvshow_nfo_path] = file_hash(tvshow_nfo_path)
-                except (OSError, UnicodeError):
-                    pass  # Unreadable or custom metadata is preserved.
-
-            for episode_rel in episodes:
-                episode = episode_rel.episode
-                season_num = episode.season_number or 0
-                episode_num = episode.episode_number or 0
-                if self._owned(series, "series", (season_num, episode_num)):
-                    continue
-                generated_nfos = dict(shared_nfos)
-
-                season_folder_name = f"Season {season_num:02d}"
-                season_folder = os.path.join(series_folder, season_folder_name)
-
-                episode_title = episode.name or ""
-                if episode_title:
-                    clean_title = self._clean_title(episode_title)
-                    filename = f"{series_name} - S{season_num:02d}E{episode_num:02d} - {clean_title}"
-                else:
-                    filename = f"{series_name} - S{season_num:02d}E{episode_num:02d}"
-                filename = self._sanitize_filename(filename)
-
-                strm_path = os.path.join(season_folder, f"{filename}.strm")
-                decision = rec.episode_decision(episode_rel, strm_path, series) if rec else None
-                if decision and episode_cache.get(decision[0]) == decision[1]:
-                    unchanged_episodes += 1
-                    with rec.counter_lock:
-                        rec.report['generation_unchanged'] += 1
-                    continue
-                is_existing = os.path.isfile(strm_path)
-                if is_existing and not refresh_existing:
-                    continue
-                if not self._writable_strm(strm_path, episode.uuid, "episode"):
-                    logger.warning("Preserving unverified or edited STRM: %s", strm_path)
-                    continue
-
-                os.makedirs(season_folder, exist_ok=True)
-                proxy_url = self._build_proxy_url(
-                    dispatcharr_url, "episode", episode.uuid, episode_rel.stream_id, omit_stream_id,
-                )
-                # Only write when the URL actually changed, preserving mtime so
-                # media servers don't re-index the whole library (#11).
-                changed = self._write_if_different_preserve_times(strm_path, proxy_url)
-                if not changed:
-                    unchanged_episodes += 1
-                elif is_existing:
-                    refreshed_episodes += 1
-                else:
-                    new_episodes += 1
-
+                shared_nfos = {}
+                prepared_seasons = set()
                 if generate_nfo:
-                    nfo_path = os.path.join(season_folder, f"{filename}.nfo")
-                    if not os.path.lexists(nfo_path):
-                        with open(nfo_path, 'w', encoding='utf-8') as f:
-                            f.write(self._generate_episode_nfo(episode))
+                    tvshow_nfo_path = os.path.join(series_folder, "tvshow.nfo")
+                    tvshow_content = self._generate_tvshow_nfo(series, cat_name, nfo_omit_title)
+                    if not os.path.lexists(tvshow_nfo_path):
+                        with open(tvshow_nfo_path, 'w', encoding='utf-8') as f:
+                            f.write(tvshow_content)
                         new_nfo += 1
-                        generated_nfos[nfo_path] = file_hash(nfo_path)
-                self._track(strm_path, series, "series", episode_rel, (season_num, episode_num), generated_nfos)
-                if decision:
-                    rec.cache_complete(episode_cache_kind, *decision, strm_path)
+                    try:
+                        contents = Path(tvshow_nfo_path).read_bytes()
+                        if contents.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n") == tvshow_content:
+                            shared_nfos[tvshow_nfo_path] = hashlib.sha256(contents).hexdigest()
+                    except (OSError, UnicodeError):
+                        pass  # Unreadable or custom metadata is preserved.
 
+                for episode_rel in episodes:
+                    episode = episode_rel.episode
+                    season_num = episode.season_number or 0
+                    episode_num = episode.episode_number or 0
+                    if self._owned(series, "series", (season_num, episode_num)):
+                        continue
+                    generated_nfos = dict(shared_nfos)
+
+                    season_folder_name = f"Season {season_num:02d}"
+                    season_folder = os.path.join(series_folder, season_folder_name)
+
+                    episode_title = episode.name or ""
+                    if episode_title:
+                        clean_title = self._clean_title(episode_title)
+                        filename = f"{series_name} - S{season_num:02d}E{episode_num:02d} - {clean_title}"
+                    else:
+                        filename = f"{series_name} - S{season_num:02d}E{episode_num:02d}"
+                    filename = self._sanitize_filename(filename)
+
+                    strm_path = os.path.join(season_folder, f"{filename}.strm")
+                    decision = rec.episode_decision(episode_rel, strm_path, series) if rec else None
+                    if decision and episode_cache.get(decision[0]) == decision[1]:
+                        unchanged_episodes += 1
+                        with rec.counter_lock:
+                            rec.report['generation_unchanged'] += 1
+                        continue
+                    is_existing = os.path.isfile(strm_path)
+                    if is_existing and not refresh_existing:
+                        continue
+                    if not self._writable_strm(strm_path, episode.uuid, "episode"):
+                        logger.warning("Preserving unverified or edited STRM: %s", strm_path)
+                        continue
+
+                    if season_folder not in prepared_seasons:
+                        os.makedirs(season_folder, exist_ok=True)
+                        prepared_seasons.add(season_folder)
+                    proxy_url = self._build_proxy_url(
+                        dispatcharr_url, "episode", episode.uuid, episode_rel.stream_id, omit_stream_id,
+                    )
+                    # Only write when the URL actually changed, preserving mtime so
+                    # media servers don't re-index the whole library (#11).
+                    with rec.measure('strm_write', 1, worker=True) if rec else nullcontext():
+                        changed = self._write_if_different_preserve_times(strm_path, proxy_url, directory_ready=True)
+                    if not changed:
+                        unchanged_episodes += 1
+                    elif is_existing:
+                        refreshed_episodes += 1
+                    else:
+                        new_episodes += 1
+
+                    if generate_nfo:
+                        nfo_path = os.path.join(season_folder, f"{filename}.nfo")
+                        with rec.measure('episode_nfo', 1, worker=True) if rec else nullcontext():
+                            if not os.path.lexists(nfo_path):
+                                with open(nfo_path, 'w', encoding='utf-8') as f:
+                                    f.write(self._generate_episode_nfo(episode))
+                                new_nfo += 1
+                                generated_nfos[nfo_path] = file_hash(nfo_path)
+                    self._track(strm_path, series, "series", episode_rel, (season_num, episode_num), generated_nfos)
+                    if decision:
+                        rec.cache_complete(episode_cache_kind, *decision, strm_path)
             if new_episodes == 0 and refreshed_episodes == 0:
                 return {
                     "created": False,
@@ -1558,6 +1589,7 @@ class Plugin:
                     "episodes": 0,
                     "refreshed": 0,
                     "unchanged": unchanged_episodes,
+                    "evaluated_episodes": episode_count,
                     "nfo_files": new_nfo,
                     "message": f"{series_name} - up-to-date ({episode_count} episodes on disk)",
                 }
@@ -1576,6 +1608,7 @@ class Plugin:
                 "episodes": new_episodes,
                 "refreshed": refreshed_episodes,
                 "unchanged": unchanged_episodes,
+                "evaluated_episodes": episode_count,
                 "nfo_files": new_nfo,
                 "message": msg,
             }
@@ -2113,7 +2146,7 @@ class Plugin:
 
         return name or "Unknown"
 
-    def _write_if_different_preserve_times(self, path: str, new_contents: str) -> bool:
+    def _write_if_different_preserve_times(self, path: str, new_contents: str, directory_ready=False) -> bool:
         """Write a .strm only when its contents actually change, preserving the
         original mtime when updating an existing file.
 
@@ -2133,7 +2166,7 @@ class Plugin:
         Reported with a patch by @bruor (issue #11).
         """
         dir_path = os.path.dirname(path)
-        if dir_path:
+        if dir_path and not directory_ready:
             os.makedirs(dir_path, exist_ok=True)
 
         if not os.path.exists(path):
