@@ -1,7 +1,7 @@
 """
 VOD to Media Library — Dispatcharr VOD .strm Generator Plugin
 (slug: vod2mlib)
-v1.20.0 — independent movie and series metadata filters.
+v1.20.1 — independent movie and series metadata filters.
 
 MIT License
 Copyright (c) 2025-2026 shedunraid (original author)
@@ -41,7 +41,7 @@ class Plugin:
     """Generate .strm files for VOD movies from Dispatcharr."""
 
     name = "VOD to Media Library (mwongj fork)"
-    version = "1.20.0"
+    version = "1.20.1"
     help_url = "https://github.com/mwongj/VOD2MLIB#readme"
     description = (
         "Convert Dispatcharr VODs into media-server-friendly .strm files, with "
@@ -321,7 +321,7 @@ class Plugin:
      {'id': '_section_schedule',
       'label': '[AUTO-RESCAN SCHEDULE]',
       'type': 'info',
-      'description': 'Configure the cron job. Click Apply in the Actions tab to register or update.'},
+      'description': 'Scheduled jobs use the same saved settings as manual actions. Click Apply to register or change the cron time and timezone.'},
      {'id': 'schedule_cron',
       'label': 'Auto-Rescan Schedule (cron)',
       'type': 'string',
@@ -502,12 +502,12 @@ class Plugin:
       'button_color': 'blue',
       'confirm': {'required': True,
                   'title': 'Fire scheduled task now?',
-                  'message': 'Runs the same action the cron will fire (with the snapshotted settings) right now. '
+                  'message': 'Runs the current saved scheduled action with the current saved settings right now. '
                              'Useful to verify the pipeline works. May take many minutes depending on the '
                              'action.'}},
      {'id': 'apply_schedule',
       'label': '[SCHEDULE] Apply / Update',
-      'description': 'Register or update the cron task. Re-apply after operational changes; filters are read live.',
+      'description': 'Register or update the cron time and timezone. All actions use current saved settings.',
       'button_label': 'Apply',
       'button_variant': 'outline',
       'button_color': 'blue'},
@@ -2347,15 +2347,13 @@ class Plugin:
             timezone=tz_str,
         )
 
-        snapshot = {k: v for k, v in (settings or {}).items() if not k.startswith("schedule_")}
-
         task, created = PeriodicTask.objects.update_or_create(
             name=self.SCHEDULE_TASK_NAME,
             defaults={
                 "crontab": schedule,
                 "task": self.SCHEDULED_TASK_CELERY_NAME,
                 "queue": "dvr",
-                "kwargs": json.dumps({"action": target, "settings": snapshot}),
+                "kwargs": json.dumps({}),
                 "enabled": True,
                 "description": f"Auto-rescan for {self.name} v{self.version}",
             },
@@ -2363,17 +2361,16 @@ class Plugin:
 
         verb = "Created" if created else "Updated"
         logger.info("%s schedule: %s @ '%s' (%s) → action '%s'", verb, self.SCHEDULE_TASK_NAME, cron_expr, tz_str, target)
-        logger.info("Settings snapshot keys: %s", sorted(snapshot.keys()))
         logger.info("")
-        logger.info("Filters are read live at run start. Re-apply after changing other schedule settings.")
+        logger.info("All settings and the scheduled action are read from saved plugin settings at run start. Re-apply only to change the cron time or timezone.")
 
         warning = ""
-        refresh_on = bool(snapshot.get("refresh_existing", False))
+        refresh_on = bool(settings.get("refresh_existing", False))
         if target == "generate_series" and not refresh_on:
             warning = (
                 " ⚠️ 'Refresh Existing Series' is OFF — cron will only ADD new series, "
                 "not pick up new episodes for already-processed series. "
-                "Turn it ON and re-Apply for true auto-rescans, or use target 'rescan_all' which forces it ON."
+                "Turn it ON and Save for true auto-rescans, or use target 'rescan_all' which forces it ON."
             )
             logger.warning(warning.strip())
 
@@ -2384,7 +2381,8 @@ class Plugin:
             "cron": cron_expr,
             "timezone": tz_str,
             "target": target,
-            "refresh_existing_in_snapshot": refresh_on,
+            "refresh_existing": refresh_on,
+            "settings_source": "current_saved",
         }
 
     def _remove_schedule(self, settings: Dict[str, Any], logger):
@@ -2433,17 +2431,15 @@ class Plugin:
         logger.info("  Cron:       %s", cron_str)
         logger.info("  Timezone:   %s", tz_str)
         logger.info("  Task:       %s", task.task)
-        logger.info("  Kwargs:     %s", task.kwargs)
+        logger.info("  Settings:   current saved plugin settings")
+        logger.info("  Action:     %s", settings.get("schedule_target") or "rescan_all")
         logger.info("  Last run:   %s", last_run)
         logger.info("  Total runs: %s", task.total_run_count)
         if drifted:
             logger.warning(
-                "  ⚠ Settings changed since last Apply Schedule: %s", ", ".join(drifted)
+                "  ⚠ Cron settings changed since last Apply Schedule: %s", ", ".join(drifted)
             )
-            logger.warning(
-                "    Cron is still running the OLD snapshot — click "
-                "'[SCHEDULE] Apply / Update' to refresh it."
-            )
+            logger.warning("    Click '[SCHEDULE] Apply / Update' to change the registered cron time or timezone.")
 
         message = (
             f"Schedule {state} — cron '{cron_str}' ({tz_str}), "
@@ -2452,7 +2448,7 @@ class Plugin:
         if drifted:
             message = (
                 f"⚠ Settings changed since last Apply ({', '.join(drifted)}) — "
-                f"re-click Apply Schedule to refresh the cron snapshot. " + message
+                f"re-click Apply Schedule to update the cron time or timezone. " + message
             )
         return {
             "status": "ok",
@@ -2465,40 +2461,35 @@ class Plugin:
             "last_run_at": str(task.last_run_at) if task.last_run_at else None,
             "total_run_count": task.total_run_count,
             "settings_drifted": drifted,
+            "settings_source": "current_saved",
+            "target": settings.get("schedule_target") or "rescan_all",
         }
 
     def _settings_drift_keys(self, task, current_settings):
-        """Return the list of setting keys whose live value differs from the
-        snapshot stored in the PeriodicTask at the last Apply Schedule.
-
-        Compare operational snapshot keys, excluding filters which are read live
-        at task start. `schedule_` keys configure the cron itself.
-        """
-        import json
-        try:
-            stored = (json.loads(task.kwargs or "{}") or {}).get("settings") or {}
-        except (ValueError, TypeError):
+        """Only the registered trigger needs Apply after changing saved settings."""
+        cron = getattr(task, "crontab", None)
+        if cron is None:
             return []
-        current = {
-            k: v for k, v in (current_settings or {}).items()
-            if not k.startswith("schedule_")
-        }
-        filter_keys = {field['id'] for field in FILTER_FIELDS}
-        changed = {k for k in stored if k not in filter_keys and stored.get(k) != current.get(k)}
-        if 'series_workers' not in stored and current.get('series_workers', '3') != '3':
-            changed.add('series_workers')
-        return sorted(changed)
+        current = current_settings or {}
+        registered = " ".join(str(getattr(cron, name)) for name in
+                              ("minute", "hour", "day_of_month", "month_of_year", "day_of_week"))
+        changed = []
+        if " ".join((current.get("schedule_cron") or "0 3 * * *").split()) != registered:
+            changed.append("schedule_cron")
+        if ((current.get("schedule_timezone") or "").strip() or "UTC") != str(cron.timezone or "UTC"):
+            changed.append("schedule_timezone")
+        return changed
 
     @staticmethod
-    def _scheduled_settings(snapshot):
-        # Operational schedule settings retain their applied snapshot. Filters
-        # always reflect the user's latest saved choices, including cleared rules.
+    def _scheduled_settings(snapshot=None):
+        # Ignore legacy task snapshots: saved UI settings are the only source.
         from apps.plugins.models import PluginConfig
-        saved = PluginConfig.objects.get(key='vod2mlib').settings or {}
-        settings = dict(snapshot or {})
-        settings.update({field['id']: saved.get(field['id'], field['default'])
-                         for field in FILTER_FIELDS})
+        settings = dict(PluginConfig.objects.get(key="vod2mlib").settings or {})
+        for field in Plugin.fields:
+            if "default" in field:
+                settings.setdefault(field["id"], field["default"])
         configuration(settings)
+        Plugin()._series_worker_count(settings)
         return settings
 
     def _schedule_test_fire(self, settings: Dict[str, Any], logger):
@@ -2518,23 +2509,17 @@ class Plugin:
         if not task:
             return {"status": "error", "message": "No schedule registered. Click Apply first."}
 
-        import json
-        try:
-            kwargs = json.loads(task.kwargs or "{}")
-        except json.JSONDecodeError as e:
-            return {"status": "error", "message": f"Stored task kwargs invalid JSON: {e}"}
-
-        action = kwargs.get("action") or "rescan_all"
-        snapshot_settings = self._scheduled_settings(kwargs.get("settings") or {})
+        current = self._scheduled_settings()
+        action = current.get("schedule_target") or "rescan_all"
 
         if action not in self._valid_schedule_targets():
-            return {"status": "error", "message": f"Stored action '{action}' is not a valid target."}
+            return {"status": "error", "message": f"Saved action '{action}' is not a valid target."}
 
         try:
             from celery import current_app
             async_result = current_app.send_task(
                 self.SCHEDULED_TASK_CELERY_NAME,
-                kwargs={"action": action, "settings": snapshot_settings},
+                kwargs={},
                 queue="dvr",
             )
         except Exception as e:
@@ -2565,7 +2550,11 @@ try:
         """
         import logging
         logger = logging.getLogger("vod2mlib.schedule")
-        result = action_runner.run_and_wait(action, {}, Plugin._scheduled_settings(settings))
+        current = Plugin._scheduled_settings()
+        action = current.get("schedule_target") or "rescan_all"
+        if action not in Plugin()._valid_schedule_targets():
+            raise ValueError(f"Invalid schedule_target: {action}")
+        result = action_runner.run_and_wait(action, {}, current)
         try:
             from django.utils import timezone
             from django_celery_beat.models import PeriodicTask

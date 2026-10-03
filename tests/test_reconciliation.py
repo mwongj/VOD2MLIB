@@ -79,10 +79,10 @@ def test_series_uses_configured_worker_pool_without_changing_output(library, mon
     assert metrics['checkpoint_enqueue']['items'] == 1
 
 
-def test_nondefault_worker_count_reports_schedule_drift(library):
+def test_worker_count_is_live_without_schedule_drift(library):
     task = NS(kwargs='{"settings": {}}')
     assert 'series_workers' not in library.p._settings_drift_keys(task, {'series_workers': '3'})
-    assert 'series_workers' in library.p._settings_drift_keys(task, {'series_workers': '6'})
+    assert 'series_workers' not in library.p._settings_drift_keys(task, {'series_workers': '6'})
 
 
 def test_drain_frees_checkpoints_before_inventory_and_never_commits_after_failure(library, monkeypatch):
@@ -1226,7 +1226,7 @@ def test_strm_inventory_stores_raw_url_without_hash(library, monkeypatch):
     )
 
 
-def test_apply_schedule_persists_reconciliation_settings(library, monkeypatch):
+def test_apply_schedule_does_not_persist_settings_or_credentials(library, monkeypatch):
     captured = {}
 
     def update_or_create(**kwargs):
@@ -1247,12 +1247,8 @@ def test_apply_schedule_persists_reconciliation_settings(library, monkeypatch):
         deletion_scope="strm_nfo",
     )
     assert result["status"] == "ok"
-    snapshot = json.loads(captured["defaults"]["kwargs"])["settings"]
-    assert snapshot["media_library_enabled"] is True
-    assert snapshot["media_server_token"] == "key"
-    assert snapshot["media_tv_mode"] == "episodes"
-    assert snapshot["m3u_cleanup_enabled"] is True
-    assert snapshot["deletion_scope"] == "strm_nfo"
+    assert json.loads(captured["defaults"]["kwargs"]) == {}
+    assert "key" not in captured["defaults"]["kwargs"]
     assert captured["defaults"]["queue"] == "dvr"
 
 

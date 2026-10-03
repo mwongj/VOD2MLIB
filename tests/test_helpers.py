@@ -1155,7 +1155,7 @@ class TestSettingsDriftKeys:
         snap = {"settings": {"append_tmdb_id_to_folder": False, "batch_size": "250"}}
         task = _FakeTask(json.dumps(snap))
         current = {"append_tmdb_id_to_folder": True, "batch_size": "250"}
-        assert p._settings_drift_keys(task, current) == ["append_tmdb_id_to_folder"]
+        assert p._settings_drift_keys(task, current) == []
 
     def test_new_setting_not_in_snapshot_is_not_flagged(self, p):
         # A setting added by a plugin upgrade (absent from the old snapshot)

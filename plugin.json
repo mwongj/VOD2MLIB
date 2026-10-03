@@ -1,6 +1,6 @@
 {
   "name": "VOD to Media Library (mwongj fork)",
-  "version": "1.20.0",
+  "version": "1.20.1",
   "description": "VOD → media library bridge. Generates .strm + NFO files from Dispatcharr's VOD catalogue, with optional cron-driven auto-rescan that picks up newly-added episodes.",
   "author": "mwongj",
   "license": "MIT",
@@ -257,7 +257,7 @@
       "id": "_section_schedule",
       "label": "[AUTO-RESCAN SCHEDULE]",
       "type": "info",
-      "description": "Configure the cron job. Click Apply in the Actions tab to register or update."
+      "description": "Scheduled jobs use the same saved settings as manual actions. Click Apply to register or change the cron time and timezone."
     },
     {
       "id": "schedule_cron",
@@ -672,13 +672,13 @@
       "confirm": {
         "required": true,
         "title": "Fire scheduled task now?",
-        "message": "Runs the same action the cron will fire (with the snapshotted settings) right now. Useful to verify the pipeline works. May take many minutes depending on the action."
+        "message": "Runs the current saved scheduled action with the current saved settings right now. Useful to verify the pipeline works. May take many minutes depending on the action."
       }
     },
     {
       "id": "apply_schedule",
       "label": "[SCHEDULE] Apply / Update",
-      "description": "Register or update the cron task. Re-apply after operational changes; filters are read live.",
+      "description": "Register or update the cron time and timezone. All actions use current saved settings.",
       "button_label": "Apply",
       "button_variant": "outline",
       "button_color": "blue"
