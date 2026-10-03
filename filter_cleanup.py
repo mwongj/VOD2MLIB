@@ -113,25 +113,31 @@ def cleanup(rec, action):
             if not batch:
                 break
             last_path = batch[-1]['path']
-            for row in batch:
-                rec.report['filter_checked'] += 1
-                db.execute('INSERT OR IGNORE INTO filter_handled VALUES (?)', (row['path'],))
-                was_existing = os.path.lexists(row['path'])
-                try:
-                    outcome = rec.store.delete(row, rec.roots, include_nfo=True,
-                                               dry_run=dry_run, stats=rec.report)
-                    rec.report[outcome] += 1
-                    counter = {'candidate': 'filter_candidates', 'deleted': 'filter_deleted',
-                               'preserved': 'filter_preserved', 'missing': 'filter_missing'}[outcome]
-                    rec.report[counter] += 1
-                    if outcome == 'deleted':
-                        rec.report[f'filter_{row["kind"]}_deleted'] += 1
-                    rec.logger.info('%s: %s (metadata filters)', outcome, row['path'])
-                except OSError as error:
-                    if was_existing and not os.path.lexists(row['path']):
-                        rec.report['deleted'] += 1
-                        rec.report['filter_deleted'] += 1
-                        rec.report[f'filter_{row["kind"]}_deleted'] += 1
-                    rec.report['errors'] += 1
-                    rec.report['filter_errors'] += 1
-                    rec.logger.error('Filter cleanup failed for %s: %s', row['path'], error)
+            with rec.measure('filter_cleanup_batch', len(batch)), rec.store.forget_batch():
+                for row in batch:
+                    rec.report['filter_checked'] += 1
+                    db.execute('INSERT OR IGNORE INTO filter_handled VALUES (?)', (row['path'],))
+                    was_existing = os.path.lexists(row['path'])
+                    try:
+                        outcome = rec.store.delete(row, rec.roots, include_nfo=True,
+                                                   dry_run=dry_run, stats=rec.report)
+                        rec.report[outcome] += 1
+                        counter = {'candidate': 'filter_candidates', 'deleted': 'filter_deleted',
+                                   'preserved': 'filter_preserved', 'missing': 'filter_missing'}[outcome]
+                        rec.report[counter] += 1
+                        if outcome == 'deleted':
+                            rec.report[f'filter_{row["kind"]}_deleted'] += 1
+                        rec.logger.info('%s: %s (metadata filters)', outcome, row['path'])
+                    except OSError as error:
+                        if was_existing and not os.path.lexists(row['path']):
+                            rec.report['deleted'] += 1
+                            rec.report['filter_deleted'] += 1
+                            rec.report[f'filter_{row["kind"]}_deleted'] += 1
+                        rec.report['errors'] += 1
+                        rec.report['filter_errors'] += 1
+                        rec.logger.error('Filter cleanup failed for %s: %s', row['path'], error)
+            rec.progress(
+                f"Applying metadata filters: {rec.report['filter_checked']:,} checked, "
+                f"{rec.report['filter_deleted']:,} removed, "
+                f"{rec.report['filter_preserved']:,} protected; "
+                f"{rec.report['filter_errors']:,} errors")

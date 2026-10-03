@@ -228,22 +228,51 @@ class InventoryStore:
             )
             self.db.executemany("INSERT OR IGNORE INTO sources VALUES (?,?)", sources)
 
-    def rows(self, batch=BATCH_SIZE, skip_filters=False):
-        sql = 'SELECT f.* FROM files f'
+    def row_batches(self, batch=BATCH_SIZE, skip_filters=False):
+        sql = 'SELECT f.* FROM files f WHERE f.path>?'
         if skip_filters:
-            sql += ' WHERE NOT EXISTS (SELECT 1 FROM filter_handled h WHERE h.path=f.path)'
-        cursor = self.db.execute(sql + ' ORDER BY f.path')
+            sql += ' AND NOT EXISTS (SELECT 1 FROM filter_handled h WHERE h.path=f.path)'
+        sql += ' ORDER BY f.path LIMIT ?'
+        last_path = ''
         while True:
-            rows = cursor.fetchmany(batch)
+            rows = self.db.execute(sql, (last_path, batch)).fetchall()
             if not rows:
                 break
+            last_path = rows[-1]['path']
+            yield rows
+
+    def rows(self, batch=BATCH_SIZE, skip_filters=False):
+        for rows in self.row_batches(batch, skip_filters):
             yield from rows
 
+    @contextmanager
+    def forget_batch(self):
+        """Commit one bounded group of removals; rolled-back paths remain retryable."""
+        if getattr(self, '_forget_batch_active', False):
+            raise RuntimeError('Inventory removal batches cannot nest')
+        self._forget_batch_active = True
+        self._cleanup_folders = {}
+        try:
+            with self.db:
+                yield
+                for folder, (roots, stats) in sorted(
+                        self._cleanup_folders.items(), key=lambda item: len(item[0]), reverse=True):
+                    self._remove_empty_parents(folder, roots, stats)
+        finally:
+            self._forget_batch_active = False
+            self._cleanup_folders = {}
+
     def forget(self, path):
-        with self.db:
-            self.db.execute("DELETE FROM generation_entries WHERE path=?", (path,))
-            self.db.execute("DELETE FROM sources WHERE path=?", (path,))
-            self.db.execute("DELETE FROM files WHERE path=?", (path,))
+        if getattr(self, '_forget_batch_active', False):
+            self._forget(path)
+        else:
+            with self.db:
+                self._forget(path)
+
+    def _forget(self, path):
+        self.db.execute("DELETE FROM generation_entries WHERE path=?", (path,))
+        self.db.execute("DELETE FROM sources WHERE path=?", (path,))
+        self.db.execute("DELETE FROM files WHERE path=?", (path,))
 
     def absent(self, path):
         # Unknown legacy references cannot establish absence.
@@ -289,7 +318,15 @@ class InventoryStore:
                     if stats is not None:
                         stats["deleted_nfo"] = stats.get("deleted_nfo", 0) + 1
         self.forget(path)
-        folder = Path(path).parent
+        folder = str(Path(path).parent)
+        if getattr(self, '_forget_batch_active', False):
+            self._cleanup_folders[folder] = (roots, stats)
+        else:
+            self._remove_empty_parents(folder, roots, stats)
+        return "missing" if missing else "deleted"
+
+    def _remove_empty_parents(self, folder, roots, stats):
+        folder = Path(folder)
         while contained(str(folder), roots):
             try:
                 folder.rmdir()
@@ -298,4 +335,3 @@ class InventoryStore:
             except OSError:
                 break
             folder = folder.parent
-        return "missing" if missing else "deleted"

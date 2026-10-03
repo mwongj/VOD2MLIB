@@ -835,43 +835,49 @@ class Reconciliation:
         self.progress(
             "Previewing cleanup" if dry_run else "Reconciling generated files"
         )
-        for row in self.store.rows(skip_filters=getattr(self, 'filter_cleanup_active', False)):
-            identity = Identity(
-                row["kind"], row["title"], row["year"], row["tmdb"], row["imdb"]
-            )
-            position = (
-                (row["season"], row["episode"]) if row["kind"] == "series" else None
-            )
-            duplicate = server and self.snapshot.owns(
-                identity, position, self.settings.get("media_tv_mode", "show")
-            )
-            absent = m3u and self.store.absent(row["path"])
-            if not duplicate and not absent:
-                if self.verify_missing and not dry_run and not os.path.lexists(row["path"]):
-                    self.store.forget(row["path"])
-                    self.report["missing"] += 1
-                continue
-            was_existing = os.path.lexists(row["path"])
-            try:
-                outcome = self.store.delete(
-                    row,
-                    self.roots,
-                    self.settings.get("deletion_scope", "strm") == "strm_nfo",
-                    dry_run,
-                    stats=self.report,
-                )
-                self.report[outcome] += 1
-                self.logger.info(
-                    "%s: %s (%s)",
-                    outcome,
-                    row["path"],
-                    "media server" if duplicate else "M3U removal",
-                )
-            except OSError as error:
-                if was_existing and not os.path.lexists(row["path"]):
-                    self.report["deleted"] += 1
-                self.report["errors"] += 1
-                self.logger.error("Cleanup failed for %s: %s", row["path"], error)
+        for batch in self.store.row_batches(skip_filters=getattr(self, 'filter_cleanup_active', False)):
+            with self.measure('cleanup_batch', len(batch)), self.store.forget_batch():
+                for row in batch:
+                    identity = Identity(
+                        row["kind"], row["title"], row["year"], row["tmdb"], row["imdb"]
+                    )
+                    position = (
+                        (row["season"], row["episode"]) if row["kind"] == "series" else None
+                    )
+                    duplicate = server and self.snapshot.owns(
+                        identity, position, self.settings.get("media_tv_mode", "show")
+                    )
+                    absent = m3u and self.store.absent(row["path"])
+                    if not duplicate and not absent:
+                        if self.verify_missing and not dry_run and not os.path.lexists(row["path"]):
+                            self.store.forget(row["path"])
+                            self.report["missing"] += 1
+                        continue
+                    was_existing = os.path.lexists(row["path"])
+                    try:
+                        outcome = self.store.delete(
+                            row,
+                            self.roots,
+                            self.settings.get("deletion_scope", "strm") == "strm_nfo",
+                            dry_run,
+                            stats=self.report,
+                        )
+                        self.report[outcome] += 1
+                        self.logger.info(
+                            "%s: %s (%s)",
+                            outcome,
+                            row["path"],
+                            "media server" if duplicate else "M3U removal",
+                        )
+                    except OSError as error:
+                        if was_existing and not os.path.lexists(row["path"]):
+                            self.report["deleted"] += 1
+                        self.report["errors"] += 1
+                        self.logger.error("Cleanup failed for %s: %s", row["path"], error)
+            self.report['cleanup_checked'] = self.report.get('cleanup_checked', 0) + len(batch)
+            self.progress(
+                f"Reconciling output: {self.report['cleanup_checked']:,} checked, "
+                f"{self.report['deleted']:,} removed; {self.report['errors']:,} errors")
 
     def owns(self, obj, kind, position=None):
         owned = self.snapshot is not None and self.snapshot.owns(

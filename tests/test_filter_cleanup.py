@@ -187,3 +187,90 @@ def test_nfo_failure_reports_removed_strm_and_retries_remaining_nfo(library, mon
     result = library.run(movie_earliest_year='2000')
     assert result['reconciliation']['filter_missing'] == 1
     assert not path.with_suffix('.nfo').exists()
+
+
+def test_filter_removals_commit_once_per_bounded_batch(library, monkeypatch):
+    import filter_cleanup
+    from inventory import InventoryStore
+    monkeypatch.setattr(filter_cleanup, 'LOOKUP_BATCH_SIZE', 2)
+    library.rows['movies'].extend(relation(media(n, year=1914)) for n in range(1, 8))
+    library.run()
+    commits = []
+    original = InventoryStore.__init__
+    def instrument(self, *args, **kwargs):
+        original(self, *args, **kwargs)
+        self.db.set_trace_callback(lambda sql: commits.append(sql) if
+            sql == 'COMMIT' and getattr(self, '_forget_batch_active', False) else None)
+    monkeypatch.setattr(InventoryStore, '__init__', instrument)
+    result = library.run(movie_earliest_year='2000')
+    assert result['reconciliation']['filter_deleted'] == 7
+    assert len(commits) == 4
+    timing = result['reconciliation']['timings']['filter_cleanup_batch']
+    assert timing['calls'] == 4 and timing['items'] == 7
+
+
+def test_interrupted_removal_batch_retains_inventory_for_safe_retry(library):
+    from inventory import InventoryStore
+    library.rows['movies'].extend(relation(media(n, year=1914)) for n in (1, 2))
+    library.run()
+    store = InventoryStore(library.tmp / 'state')
+    rows = list(store.rows())
+    with pytest.raises(RuntimeError, match='interrupted'):
+        with store.forget_batch():
+            assert store.delete(rows[0], [library.settings['root_folder']], include_nfo=True) == 'deleted'
+            raise RuntimeError('interrupted')
+    assert not Path(rows[0]['path']).exists()
+    assert len(list(store.rows())) == 2
+    store.close()
+    result = library.run(movie_earliest_year='2000')
+    assert result['reconciliation']['filter_missing'] == 1
+    assert result['reconciliation']['filter_deleted'] == 1
+    store = InventoryStore(library.tmp / 'state')
+    assert not list(store.rows())
+    store.close()
+
+
+def test_removal_batch_prunes_shared_directory_once(tmp_path, monkeypatch):
+    from inventory import InventoryStore
+    root = tmp_path / 'output'
+    season = root / 'Show' / 'Season 1'
+    season.mkdir(parents=True)
+    store = InventoryStore(tmp_path / 'state')
+    original = Path.rmdir
+    attempts = []
+    def track(self):
+        attempts.append(str(self))
+        return original(self)
+    monkeypatch.setattr(Path, 'rmdir', track)
+    from media_library import Identity
+    records = []
+    for n in range(5):
+        path = season / f'{n}.strm'
+        path.write_text(f'http://example.invalid/{n}')
+        records.append((str(path), Identity('series', 'Show', '2010', None, None),
+                        f'["episode","1","{n}"]', (1, n), None))
+    store.record_many(records)
+    stats = {}
+    with store.forget_batch():
+        for row in list(store.rows()):
+            assert store.delete(row, [str(root)], stats=stats) == 'deleted'
+        assert season.exists()
+    assert attempts.count(str(season)) == 1
+    assert stats['removed_dirs'] == 2
+    assert root.is_dir() and not list(root.iterdir())
+    store.close()
+
+
+def test_keyset_inventory_batches_do_not_skip_rows_during_deletion(library):
+    from inventory import InventoryStore
+    library.rows['movies'].extend(relation(media(n)) for n in range(1, 8))
+    library.run()
+    store = InventoryStore(library.tmp / 'state')
+    removed = []
+    for batch in store.row_batches(batch=2):
+        with store.forget_batch():
+            for row in batch:
+                removed.append(row['path'])
+                assert store.delete(row, [library.settings['root_folder']]) == 'deleted'
+    assert len(set(removed)) == 7 and not list(store.rows())
+    store.close()
