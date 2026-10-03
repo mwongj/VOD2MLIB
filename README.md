@@ -10,7 +10,7 @@
   <i>v1.18.0 — slug <code>vod2mlib</code></i>
 </p>
 
-> **Note on scheduled rescans.** The cron task routes via Dispatcharr's `dvr` Celery worker as a workaround for an upstream plugin-task-registration issue affecting the default prefork worker pool ([Dispatcharr#1244](https://github.com/Dispatcharr/Dispatcharr/issues/1244)). The routing is transparent — no user action required for new installs. If you originally set up your schedule on **v1.14.1 or earlier**, click `[SCHEDULE] Apply / Update` once after upgrading so the stored task picks up the new routing.
+> **Note on scheduled rescans.** The cron task routes via Dispatcharr's `dvr` Celery worker as a workaround for an upstream plugin-task-registration issue affecting the default prefork worker pool ([Dispatcharr#1244](https://github.com/Dispatcharr/Dispatcharr/issues/1244)). The routing is transparent — no user action required for new installs. Existing schedules retain their enabled state and automatically adopt the current routing after upgrading.
 
 > **Plex users:** Plex does *not* play `.strm` files. Jellyfin and ChannelsDVR do. See [Plex compatibility](#plex-compatibility) below.
 
@@ -154,6 +154,7 @@ The Settings tab is grouped into four sections:
 |  | Refresh Existing Series | Re-evaluate already-processed series using stored Dispatcharr episodes and refresh changed episode `.strm` URLs (cron-friendly), without provider requests. Preserves `tvshow.nfo` and episode `.nfo` edits. |
 |  | Nest Series by Category | Wrap each series folder inside a subfolder named by its M3U category (off by default; series without a category go to `Unassigned/`) |
 |  | Dedupe Series Across Categories | When nesting is ON and a series is tagged with multiple categories upstream, write under the first category only (alphabetical) instead of duplicating. No effect when nesting is OFF. Off by default. ⚠ Doesn't remove existing duplicate folders — `[⚠ DANGER] Clean up` + re-generate to migrate. |
+| **Enable Auto-Rescan** | Schedule enabled | Off for new installs; enable and Save with a valid cron to schedule jobs |
 | **Auto-rescan schedule** | Schedule (cron) | Standard 5-field expression. Default `0 3 * * *` (daily 03:00) |
 |  | Schedule Timezone | IANA timezone the cron is interpreted in (e.g. `Europe/London`). Empty = UTC. Handles DST automatically. |
 |  | Scheduled Action | What the cron fires (full rescan recommended) |
@@ -169,11 +170,11 @@ VOD category selection uses Dispatcharr’s native per-account category settings
 **Auto-rescan.**
 1. Turn ON **Refresh Existing Series**.
 2. Set **Scheduled Action** to **Full rescan**.
-3. Click `[SCHEDULE] Apply / Update`.
+3. Turn **Enable Auto-Rescan** ON and click **Save**. A valid cron and timezone are required before scheduling can be enabled.
 4. Verify with `[SCHEDULE] Show status` — last run / total runs populate after the first cron tick.
 5. Optional: click `[SCHEDULE] Test fire now` to immediately replay the scheduled action without waiting for the next cron tick.
 
-Manual actions, scheduled runs, and Test fire use one configuration: the current saved plugin settings, with the same defaults. Save changes to paths, batching, concurrency, integration, cleanup, filters, timeout, or the scheduled action; they apply to the next run without Apply. Existing schedule snapshots are ignored. **Apply / Update is needed only to register the schedule or change its cron time or timezone.** A running action keeps the configuration it started with.
+Manual actions, scheduled runs, and Test fire use one configuration: the current saved plugin settings, with the same defaults. Save changes to paths, batching, concurrency, integration, cleanup, filters, timeout, or the scheduled action; they apply to the next run. Save also registers or updates the cron time and timezone. Turn **Enable Auto-Rescan** OFF and Save to use manual actions only; queued ticks are skipped, and a running action keeps the configuration it started with. New installations default to scheduling disabled, while existing schedules retain their enabled state. Existing task snapshots are ignored and cleared. Invalid enabled-schedule settings are rejected before saving.
 
 ## Plex compatibility
 
@@ -250,7 +251,7 @@ The bundled logo is reproducible — replace `tools/source_logo.png` and run `py
 - The plugin is a single `plugin.py` declaring a `Plugin` class with `fields`, `actions`, and `run()` per Dispatcharr's plugin contract.
 - `plugin.json` is the manifest the [Dispatcharr/Plugins catalogue](https://github.com/Dispatcharr/Plugins) reads. Dispatcharr's runtime reads action metadata from the Python class — the JSON is for the catalogue and pre-enable preview.
 - Schedule registration uses `django-celery-beat`'s `PeriodicTask` + `CrontabSchedule`. The cron-fired task is a module-level `@shared_task` named `vod2mlib.scheduled_rescan` that constructs a fresh `Plugin()` and dispatches.
-- PeriodicTask stores only the registered trigger. The worker reads current saved plugin settings and the selected scheduled action at run start; old task snapshots are ignored. Apply updates the cron time and timezone.
+- PeriodicTask stores only the registered trigger. The worker reads current saved plugin settings and the selected scheduled action at run start; old task snapshots are ignored. Plugin-owned Django save signals validate and synchronize the cron trigger; Dispatcharr source code is unchanged.
 
 ## Changelog
 

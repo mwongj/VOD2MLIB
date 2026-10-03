@@ -1,4 +1,4 @@
-﻿"""Scheduled jobs resolve the same saved settings and defaults as manual actions."""
+"""Scheduled jobs resolve the same saved settings and defaults as manual actions."""
 import importlib.util
 import json
 import logging
@@ -15,9 +15,9 @@ def saved(monkeypatch):
     values = {'root_folder': '/saved/Movies', 'series_root_folder': '/saved/Series',
               'media_server_token': 'new-token', 'series_workers': '6',
               'batch_size': '100', 'action_timeout_minutes': 90,
-              'schedule_target': 'generate_movies'}
+              'schedule_target': 'generate_movies', 'schedule_enabled': True}
     monkeypatch.setitem(sys.modules, 'apps.plugins.models', NS(
-        PluginConfig=NS(objects=NS(get=lambda **kw: NS(settings=values)))))
+        PluginConfig=NS(objects=NS(get=lambda **kw: NS(settings=values, enabled=True)))))
     return values
 
 
@@ -57,17 +57,8 @@ def test_invalid_saved_settings_fail_before_action(saved, key, value):
         Plugin._scheduled_settings()
 
 
-def test_only_cron_time_and_timezone_require_apply():
-    task = NS(crontab=NS(minute='0', hour='3', day_of_month='*', month_of_year='*',
-                        day_of_week='*', timezone='UTC'), kwargs='{"settings":{"media_server_token":"old"}}')
-    current = {'root_folder': '/new', 'series_workers': '6', 'schedule_target': 'generate_movies'}
-    assert Plugin()._settings_drift_keys(task, current) == []
-    current.update(schedule_cron='0 4 * * *', schedule_timezone='America/New_York')
-    assert Plugin()._settings_drift_keys(task, current) == ['schedule_cron', 'schedule_timezone']
-
-
 def test_test_fire_enqueues_no_settings_or_target(saved, monkeypatch):
-    task = NS(kwargs='invalid legacy kwargs')
+    task = NS(kwargs='invalid legacy kwargs', enabled=True)
     monkeypatch.setitem(sys.modules, 'django_celery_beat.models', NS(
         PeriodicTask=NS(objects=NS(filter=lambda **kw: NS(first=lambda: task)))))
     calls = []
@@ -108,5 +99,5 @@ def test_status_does_not_print_legacy_credentials(saved, monkeypatch, caplog):
     with caplog.at_level(logging.INFO):
         result = Plugin()._schedule_status(saved, logging.getLogger('test'))
     assert result['settings_source'] == 'current_saved'
-    assert result['target'] == 'generate_movies' and result['settings_drifted'] == []
+    assert result['target'] == 'generate_movies'
     assert 'old-secret' not in caplog.text and 'new-token' not in caplog.text

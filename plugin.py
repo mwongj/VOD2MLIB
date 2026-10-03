@@ -153,7 +153,7 @@ class Plugin:
                      '  1. Configure paths below.\n'
                      '  2. Actions → Scan → see catalogue totals.\n'
                      '  3. Actions → Generate Movies / Generate Series (start with Batch Size 10).\n'
-                     '  4. (Optional) Turn ON Refresh Existing Series, set cron, click Apply Schedule for '
+                     '  4. (Optional) Turn ON Refresh Existing Series, enable Auto-Rescan, set cron, and Save for '
                      'nightly auto-rescan.\n'
                      '\n'
                      'Docs: https://github.com/mwongj/VOD2MLIB'},
@@ -287,12 +287,7 @@ class Plugin:
                   {'value': '100', 'label': '100 series'},
                   {'value': '250', 'label': '250 series'},
                   {'value': 'all', 'label': 'All series (may time out — use the schedule)'}],
-      'help_text': 'Number of series to process per click (episodes are auto-fetched for each, so series are '
-                   'much slower than movies). ⚠ This button runs synchronously and your reverse proxy will '
-                   'usually cut it off after ~60s with a 504 — the run keeps going server-side, but you lose the '
-                   "result. For a big catalogue don't use 'All' here: set the cron to 'Full rescan' and click "
-                   '[SCHEDULE] Apply / Update. Scheduled runs execute on the Celery worker with no HTTP '
-                   'timeout.'},
+      'help_text': 'Number of series to process per run using episodes stored in Dispatcharr. Actions run in the background. For automatic full rescans, select Full rescan, enable Auto-Rescan, and Save.'},
      {'id': 'series_workers', 'label': 'Parallel Series Workers', 'type': 'select', 'default': '3', 'options': [{'value': '1', 'label': '1'}, {'value': '2', 'label': '2'}, {'value': '3', 'label': '3'}, {'value': '4', 'label': '4'}, {'value': '5', 'label': '5'}, {'value': '6', 'label': '6'}], 'help_text': 'Concurrent series generation tasks using Dispatcharr database metadata. Default 3; increase after measuring database and storage performance. Movies continue using 3 workers.'},
      {'id': 'generate_series_nfo',
       'label': 'Generate Series NFO Files',
@@ -321,13 +316,18 @@ class Plugin:
      {'id': '_section_schedule',
       'label': '[AUTO-RESCAN SCHEDULE]',
       'type': 'info',
-      'description': 'Scheduled jobs use the same saved settings as manual actions. Click Apply to register or change the cron time and timezone.'},
+      'description': 'Scheduled jobs use the same saved settings as manual actions. Enable auto-rescan and Save to register or update a valid cron schedule; disable it and Save for manual actions only.'},
+     {'id': 'schedule_enabled',
+      'label': 'Enable Auto-Rescan',
+      'type': 'boolean',
+      'default': False,
+      'help_text': 'Enable scheduled runs with a valid cron and timezone. Save applies all settings. Turn off and Save for manual actions only.'},
      {'id': 'schedule_cron',
       'label': 'Auto-Rescan Schedule (cron)',
       'type': 'string',
       'default': '0 3 * * *',
       'help_text': "Standard 5-field cron: 'minute hour day-of-month month day-of-week'. Default '0 3 * * *' = "
-                   'every day at 03:00. Used by Apply Schedule.'},
+                   'every day at 03:00. Validated when scheduling is enabled; Save applies changes.'},
      {'id': 'schedule_timezone',
       'label': 'Schedule Timezone',
       'type': 'string',
@@ -505,21 +505,6 @@ class Plugin:
                   'message': 'Runs the current saved scheduled action with the current saved settings right now. '
                              'Useful to verify the pipeline works. May take many minutes depending on the '
                              'action.'}},
-     {'id': 'apply_schedule',
-      'label': '[SCHEDULE] Apply / Update',
-      'description': 'Register or update the cron time and timezone. All actions use current saved settings.',
-      'button_label': 'Apply',
-      'button_variant': 'outline',
-      'button_color': 'blue'},
-     {'id': 'remove_schedule',
-      'label': '[SCHEDULE] Unschedule',
-      'description': 'Remove the periodic auto-rescan task.',
-      'button_label': 'Remove',
-      'button_variant': 'outline',
-      'button_color': 'orange',
-      'confirm': {'required': True,
-                  'title': 'Remove auto-rescan schedule?',
-                  'message': 'This unregisters the periodic task. You can re-create it any time with Apply.'}},
      {'id': 'cleanup_movies',
       'label': '[⚠ DANGER] Clean up Movies',
       'description': 'Delete verified generated STRMs inside this root; NFO deletion follows Deletion scope. '
@@ -668,10 +653,6 @@ class Plugin:
             return self._cleanup_series(settings, logger)
         elif action == "rescan_all":
             return self._rescan_all(settings, logger)
-        elif action == "apply_schedule":
-            return self._apply_schedule(settings, logger)
-        elif action == "remove_schedule":
-            return self._remove_schedule(settings, logger)
         elif action == "schedule_status":
             return self._schedule_status(settings, logger)
         elif action == "schedule_test_fire":
@@ -2304,100 +2285,45 @@ class Plugin:
                 return {opt["value"] for opt in f.get("options", []) if opt.get("value")}
         return set()
 
-    def _apply_schedule(self, settings: Dict[str, Any], logger):
-        """Register or update a periodic auto-rescan task via django-celery-beat."""
-        cron_expr = settings.get("schedule_cron") or "0 3 * * *"
+    def _validate_saved_settings(self, settings):
+        configuration(settings)
+        self._series_worker_count(settings)
+        if not settings.get("schedule_enabled", False):
+            return
         target = settings.get("schedule_target") or "rescan_all"
-        tz_str = (settings.get("schedule_timezone") or "").strip() or "UTC"
+        if target not in self._valid_schedule_targets():
+            raise ValueError(f"Invalid schedule_target: {target}")
+        minute, hour, dom, month, dow = self._parse_cron(settings.get("schedule_cron") or "0 3 * * *")
+        from celery.schedules import crontab
+        crontab(minute=minute, hour=hour, day_of_month=dom, month_of_year=month, day_of_week=dow)
+        valid, message = self._validate_timezone(settings.get("schedule_timezone") or "UTC")
+        if not valid:
+            raise ValueError(message)
 
-        valid_targets = self._valid_schedule_targets()
-        if target not in valid_targets:
-            return {"status": "error", "message": f"Invalid schedule_target: {target}"}
-
-        try:
-            minute, hour, dom, month, dow = self._parse_cron(cron_expr)
-        except ValueError as e:
-            logger.error("Invalid cron expression: %s", e)
-            return {"status": "error", "message": str(e)}
-
-        ok_tz, tz_err = self._validate_timezone(tz_str)
-        if not ok_tz:
-            logger.error(tz_err)
-            return {"status": "error", "message": tz_err}
-
-        try:
-            from django_celery_beat.models import PeriodicTask, CrontabSchedule
-        except ImportError as e:
-            logger.error("django-celery-beat is not installed: %s", e)
-            logger.error("")
-            logger.error("Fallback: add a host-side cron entry that POSTs to Dispatcharr's plugin")
-            logger.error("action endpoint to trigger '%s' on plugin '%s'.", target, self.name)
-            return {
-                "status": "error",
-                "message": "django-celery-beat not available. Use host cron to call the plugin action instead.",
-            }
-
-        import json
+    def _sync_schedule(self, settings, logger, plugin_enabled=True):
+        """Called after Save; only the trigger is persisted, never job settings."""
+        from django_celery_beat.models import PeriodicTask, CrontabSchedule
+        existing = PeriodicTask.objects.filter(name=self.SCHEDULE_TASK_NAME).first()
+        enabled = plugin_enabled and bool(settings.get("schedule_enabled", False))
+        if not enabled:
+            if existing and (existing.enabled or existing.kwargs != "{}" or existing.args != "[]"):
+                existing.enabled = False
+                existing.kwargs = "{}"
+                existing.args = "[]"
+                existing.save()
+            return {"status": "ok", "scheduled": False}
+        self._validate_saved_settings(settings)
+        minute, hour, dom, month, dow = self._parse_cron(settings.get("schedule_cron") or "0 3 * * *")
         schedule, _ = CrontabSchedule.objects.get_or_create(
-            minute=minute,
-            hour=hour,
-            day_of_month=dom,
-            month_of_year=month,
-            day_of_week=dow,
-            timezone=tz_str,
-        )
-
-        task, created = PeriodicTask.objects.update_or_create(
-            name=self.SCHEDULE_TASK_NAME,
-            defaults={
-                "crontab": schedule,
-                "task": self.SCHEDULED_TASK_CELERY_NAME,
-                "queue": "dvr",
-                "kwargs": json.dumps({}),
-                "enabled": True,
-                "description": f"Auto-rescan for {self.name} v{self.version}",
-            },
-        )
-
-        verb = "Created" if created else "Updated"
-        logger.info("%s schedule: %s @ '%s' (%s) → action '%s'", verb, self.SCHEDULE_TASK_NAME, cron_expr, tz_str, target)
-        logger.info("")
-        logger.info("All settings and the scheduled action are read from saved plugin settings at run start. Re-apply only to change the cron time or timezone.")
-
-        warning = ""
-        refresh_on = bool(settings.get("refresh_existing", False))
-        if target == "generate_series" and not refresh_on:
-            warning = (
-                " ⚠️ 'Refresh Existing Series' is OFF — cron will only ADD new series, "
-                "not pick up new episodes for already-processed series. "
-                "Turn it ON and Save for true auto-rescans, or use target 'rescan_all' which forces it ON."
-            )
-            logger.warning(warning.strip())
-
-        return {
-            "status": "ok",
-            "message": f"{verb} periodic task for cron '{cron_expr}' ({tz_str}) → {target}.{warning}",
-            "created": created,
-            "cron": cron_expr,
-            "timezone": tz_str,
-            "target": target,
-            "refresh_existing": refresh_on,
-            "settings_source": "current_saved",
-        }
-
-    def _remove_schedule(self, settings: Dict[str, Any], logger):
-        """Unregister the periodic auto-rescan task."""
-        try:
-            from django_celery_beat.models import PeriodicTask
-        except ImportError:
-            return {"status": "ok", "message": "django-celery-beat not installed; nothing to remove."}
-
-        deleted, _ = PeriodicTask.objects.filter(name=self.SCHEDULE_TASK_NAME).delete()
-        if deleted:
-            logger.info("Removed periodic task '%s'", self.SCHEDULE_TASK_NAME)
-        else:
-            logger.info("No periodic task named '%s' was registered.", self.SCHEDULE_TASK_NAME)
-        return {"status": "ok", "message": f"Removed {deleted} scheduled task(s).", "deleted": deleted}
+            minute=minute, hour=hour, day_of_month=dom, month_of_year=month,
+            day_of_week=dow, timezone=(settings.get("schedule_timezone") or "").strip() or "UTC")
+        desired = {"crontab": schedule, "task": self.SCHEDULED_TASK_CELERY_NAME,
+                   "queue": "dvr", "kwargs": "{}", "args": "[]", "enabled": True,
+                   "description": f"Auto-rescan for {self.name} v{self.version}"}
+        if existing is None or any(getattr(existing, key) != value for key, value in desired.items()):
+            PeriodicTask.objects.update_or_create(name=self.SCHEDULE_TASK_NAME, defaults=desired)
+            logger.info("Updated schedule from saved settings")
+        return {"status": "ok", "scheduled": True, "settings_source": "current_saved"}
 
     def _schedule_status(self, settings: Dict[str, Any], logger):
         """Show current schedule registration."""
@@ -2410,7 +2336,7 @@ class Plugin:
 
         task = PeriodicTask.objects.filter(name=self.SCHEDULE_TASK_NAME).first()
         if not task:
-            msg = "No schedule registered. Click 'Apply Schedule' to enable auto-rescan."
+            msg = "No schedule registered. Enable Auto-Rescan in Settings and Save."
             logger.info(msg)
             return {"status": "ok", "message": msg, "scheduled": False}
 
@@ -2424,7 +2350,6 @@ class Plugin:
         last_run = str(task.last_run_at) if task.last_run_at else "never"
         state = "enabled" if task.enabled else "disabled"
 
-        drifted = self._settings_drift_keys(task, settings)
 
         logger.info("Schedule: %s", task.name)
         logger.info("  Enabled:    %s", task.enabled)
@@ -2435,21 +2360,10 @@ class Plugin:
         logger.info("  Action:     %s", settings.get("schedule_target") or "rescan_all")
         logger.info("  Last run:   %s", last_run)
         logger.info("  Total runs: %s", task.total_run_count)
-        if drifted:
-            logger.warning(
-                "  ⚠ Cron settings changed since last Apply Schedule: %s", ", ".join(drifted)
-            )
-            logger.warning("    Click '[SCHEDULE] Apply / Update' to change the registered cron time or timezone.")
-
         message = (
             f"Schedule {state} — cron '{cron_str}' ({tz_str}), "
             f"last run {last_run}, total runs {task.total_run_count}"
         )
-        if drifted:
-            message = (
-                f"⚠ Settings changed since last Apply ({', '.join(drifted)}) — "
-                f"re-click Apply Schedule to update the cron time or timezone. " + message
-            )
         return {
             "status": "ok",
             "message": message,
@@ -2460,36 +2374,22 @@ class Plugin:
             "task": task.task,
             "last_run_at": str(task.last_run_at) if task.last_run_at else None,
             "total_run_count": task.total_run_count,
-            "settings_drifted": drifted,
             "settings_source": "current_saved",
             "target": settings.get("schedule_target") or "rescan_all",
         }
 
-    def _settings_drift_keys(self, task, current_settings):
-        """Only the registered trigger needs Apply after changing saved settings."""
-        cron = getattr(task, "crontab", None)
-        if cron is None:
-            return []
-        current = current_settings or {}
-        registered = " ".join(str(getattr(cron, name)) for name in
-                              ("minute", "hour", "day_of_month", "month_of_year", "day_of_week"))
-        changed = []
-        if " ".join((current.get("schedule_cron") or "0 3 * * *").split()) != registered:
-            changed.append("schedule_cron")
-        if ((current.get("schedule_timezone") or "").strip() or "UTC") != str(cron.timezone or "UTC"):
-            changed.append("schedule_timezone")
-        return changed
-
     @staticmethod
-    def _scheduled_settings(snapshot=None):
+    def _scheduled_settings(snapshot=None, *, require_enabled=False):
         # Ignore legacy task snapshots: saved UI settings are the only source.
         from apps.plugins.models import PluginConfig
-        settings = dict(PluginConfig.objects.get(key="vod2mlib").settings or {})
+        cfg = PluginConfig.objects.get(key="vod2mlib")
+        settings = dict(cfg.settings or {})
         for field in Plugin.fields:
             if "default" in field:
                 settings.setdefault(field["id"], field["default"])
-        configuration(settings)
-        Plugin()._series_worker_count(settings)
+        if require_enabled and (not cfg.enabled or not settings.get("schedule_enabled", False)):
+            return None
+        Plugin()._validate_saved_settings(settings)
         return settings
 
     def _schedule_test_fire(self, settings: Dict[str, Any], logger):
@@ -2507,9 +2407,11 @@ class Plugin:
 
         task = PeriodicTask.objects.filter(name=self.SCHEDULE_TASK_NAME).first()
         if not task:
-            return {"status": "error", "message": "No schedule registered. Click Apply first."}
+            return {"status": "error", "message": "No schedule registered. Enable Auto-Rescan in Settings and Save."}
 
-        current = self._scheduled_settings()
+        current = self._scheduled_settings(require_enabled=True)
+        if current is None or not task.enabled:
+            return {"status": "error", "message": "Scheduling is disabled. Enable Auto-Rescan and Save first."}
         action = current.get("schedule_target") or "rescan_all"
 
         if action not in self._valid_schedule_targets():
@@ -2535,12 +2437,21 @@ class Plugin:
         }
 
 
+if Path(__file__).resolve().parent == Path(os.environ.get("DISPATCHARR_PLUGINS_DIR", "/data/plugins")) / "vod2mlib":
+    try:
+        from .schedule_settings import install as _install_schedule_settings
+        _install_schedule_settings(Plugin)
+    except ImportError:
+        import logging
+        logging.getLogger("vod2mlib.schedule").warning("Scheduling requires Django and django-celery-beat")
+
+
 try:
     from celery import shared_task as _vod2mlib_shared_task
 
     @_vod2mlib_shared_task(name=Plugin.SCHEDULED_TASK_CELERY_NAME)
     def _vod2mlib_scheduled_rescan(action="rescan_all", settings=None):
-        """Celery entry point invoked by the periodic task registered via _apply_schedule.
+        """Celery entry point invoked by the periodic task maintained by the settings Save hook.
 
         On completion, bumps PeriodicTask.last_run_at so Show Status reflects
         manual Test fire runs (which bypass beat) and updates beat-dispatched
@@ -2550,7 +2461,9 @@ try:
         """
         import logging
         logger = logging.getLogger("vod2mlib.schedule")
-        current = Plugin._scheduled_settings()
+        current = Plugin._scheduled_settings(require_enabled=True)
+        if current is None:
+            return {"status": "ok", "message": "Scheduling is disabled; queued tick skipped."}
         action = current.get("schedule_target") or "rescan_all"
         if action not in Plugin()._valid_schedule_targets():
             raise ValueError(f"Invalid schedule_target: {action}")
