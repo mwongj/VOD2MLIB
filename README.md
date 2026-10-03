@@ -173,6 +173,10 @@ Archives retain the metadata under `/data/vod2mlib/filtered-nfo/<run>/<movie|ser
 
 This archive pass runs independently of both NFO-generation toggles and **Deletion scope**, and is limited to the media types selected by the action. Preview reports the folders/NFOs it would archive, including metadata that would remain after planned STRM removal. Results include archive counts, protected/error counts, and the archive location.
 
+Enabled **Emby ownership cleanup** also archives NFO-only output for movies or whole shows already present in the selected real-media libraries, even if they pass all metadata filters. This prevents retained legacy/Emby NFOs from keeping an empty duplicate visible after its STRMs are removed. It uses the same complete Emby snapshot, conservative identity matching, both output roots, automatic timing and failure policy as existing ownership cleanup. Manual selective cleanup applies it immediately; a full-rescan-only or manual-only policy is respected during ordinary generation. Provider-ID conflicts and any unowned matching source protect shared paths.
+
+Whole-show ownership mode can archive a series folder containing only episode NFOs, with no `tvshow.nfo`. Episode mode preserves series NFO-only folders because whole-folder metadata cannot establish ownership of missing episode positions. Metadata is retained in the same persistent archive location, with `reason: ownership` in its recovery manifest. A failed Emby snapshot or incomplete native ownership lookup cannot trigger archival. Real-media files and their metadata are outside plugin output roots and are not moved.
+
 Rejected titles do not consume creation batch slots or trigger episode loading. Incremental signatures include filter settings and metadata, so changing stored metadata or relaxing rules causes affected candidates to be reconsidered and eligible output can return. Filter rejection never establishes upstream absence: M3U cleanup uses an unfiltered database source census.
 
 ### Media-library integration and cleanup
@@ -233,6 +237,8 @@ Telemetry is local. Detailed completed timings are in the action result and `/da
 Measurements include wall/CPU seconds, item/batch counts, and phases for Emby, database catalogue reads, discovery, filter checks, cleanup, movie/series generation, episode reads, output, and inventory/checkpoint work. `episode_sql` is SQL execution; `episode_query` includes query/hydration; `episode_load` covers the complete read. `cleanup_strm_io` is cumulative verification/removal time across filesystem workers. `filter_cleanup_batch` and `cleanup_batch` include serialized inventory finalization and pruning. Parent phases include child measurements, and concurrent worker durations can exceed elapsed action time; do not add them together. Worker phases use thread CPU time, while action totals use process CPU time and exclude supervisor startup. There is no provider-fetch phase.
 
 `filter_nfo_metadata_read` measures native identity/filter projections for legacy folders; `filter_nfo_archive` measures folder inspection and archiving. `filter_nfo_folders_*`, `filter_nfo_candidates`, `filter_nfo_archived`, and `filter_nfo_errors` distinguish archived metadata from deleted STRMs/NFOs.
+
+`ownership_nfo_metadata_read`, `ownership_nfo_archive` and corresponding `ownership_nfo_*` counters report Emby-excluded NFO-only metadata separately. Preview accounts for the configured STRM/NFO deletion scope and never counts the same folder twice when both filters and ownership exclude it.
 
 ## Inventory, incremental generation, and performance
 

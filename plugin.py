@@ -184,17 +184,17 @@ class Plugin:
      {'id': '_section_nfo',
       'label': '[NFO METADATA]',
       'type': 'info',
-      'description': 'Choose who writes metadata: this plugin or Emby. Disable both generation toggles if Emby manages metadata and saves NFOs. Emby integration checks real-media ownership independently. Active filters archive rejected NFO-only folders even when generation is off or Deletion scope is STRMs only.'},
+      'description': 'Choose who writes metadata: this plugin or Emby. Disable both generation toggles if Emby manages metadata and saves NFOs. Emby integration checks real-media ownership independently. Filters and enabled Emby ownership cleanup archive excluded NFO-only folders even when generation is off or Deletion scope is STRMs only.'},
      {'id': 'generate_nfo',
       'label': 'Generate Movie NFO Files',
       'type': 'boolean',
       'default': True,
-      'help_text': 'Write Dispatcharr metadata when the movie NFO is absent. Turn this off if Emby manages metadata and saves its own NFOs. Emby integration only checks library ownership; it does not configure metadata saving. Turning this off preserves existing NFOs. Filters archive rejected NFO-only folders independently of this toggle and Deletion scope.'},
+      'help_text': 'Write Dispatcharr metadata when the movie NFO is absent. Turn this off if Emby manages metadata and saves its own NFOs. Emby integration only checks library ownership; it does not configure metadata saving. Turning this off preserves existing NFOs. Filters and enabled Emby ownership cleanup archive excluded NFO-only folders independently of this toggle and Deletion scope.'},
      {'id': 'generate_series_nfo',
       'label': 'Generate Series NFO Files',
       'type': 'boolean',
       'default': True,
-      'help_text': 'Write Dispatcharr metadata when tvshow.nfo or an episode NFO is absent. Turn this off if Emby manages metadata and saves its own NFOs. Existing NFOs are preserved during generation. Filters archive rejected NFO-only folders independently of this toggle and Deletion scope.'},
+      'help_text': 'Write Dispatcharr metadata when tvshow.nfo or an episode NFO is absent. Turn this off if Emby manages metadata and saves its own NFOs. Existing NFOs are preserved during generation. Filters and enabled Emby ownership cleanup archive excluded NFO-only folders independently of this toggle and Deletion scope.'},
      {'id': 'nfo_omit_title',
       'label': 'Omit <title> from NFO files',
       'type': 'boolean',
@@ -440,7 +440,7 @@ class Plugin:
       'default': 'strm',
       'options': [{'value': 'strm', 'label': 'STRMs only'},
                   {'value': 'strm_nfo', 'label': 'STRMs and unedited generated NFOs'}],
-      'help_text': 'For Emby/source-removal and explicit root cleanup, STRMs only preserves NFO metadata. Active metadata filters independently archive rejected NFO-only folders. STRMs and unedited generated NFOs also removes NFOs '
+      'help_text': 'For Emby/source-removal and explicit root cleanup, STRMs only preserves NFO metadata. Filters and enabled Emby ownership cleanup independently archive excluded NFO-only folders outside the library. STRMs and unedited generated NFOs also removes NFOs '
                    'whose recorded generated hashes still match. Edited or unverified files, artwork and '
                    'subtitles are preserved. Applies to automatic, selective and Movies/Series cleanup actions.'}]
 
@@ -457,11 +457,11 @@ class Plugin:
       'description': 'List Emby library names and IDs.'},
      {'id': 'preview_cleanup',
       'label': 'Preview selective cleanup',
-      'description': 'Check complete catalogues and log verified cleanup candidates without deleting output '
+      'description': 'Check complete catalogues and preview verified removals and NFO-only archives without changing output '
                      'files.'},
      {'id': 'selective_cleanup',
       'label': 'Run selective cleanup',
-      'description': 'Delete verified duplicates and confirmed M3U removals according to configured settings.'},
+      'description': 'Apply configured cleanup: remove verified duplicate/absent STRMs and archive filter- or ownership-excluded NFO-only folders.'},
      {'id': 'scan_all_vods',
       'label': '[LIBRARY] Catalogue snapshot',
       'description': 'Count unique Movies and Series in the Dispatcharr database. Read-only.',
@@ -592,6 +592,10 @@ class Plugin:
                         result['message'] += f"; NFO-only archive candidates {reconciliation.report['filter_nfo_folders_candidates']} folders ({reconciliation.report['filter_nfo_candidates']} NFOs)"
                     elif reconciliation.report['filter_nfo_folders_archived']:
                         result['message'] += f"; archived {reconciliation.report['filter_nfo_folders_archived']} NFO-only folders ({reconciliation.report['filter_nfo_archived']} NFOs) to {reconciliation.report['filter_nfo_archive_root']}"
+                    if action == 'preview_cleanup':
+                        result['message'] += f"; ownership NFO-only archive candidates {reconciliation.report['ownership_nfo_folders_candidates']} folders ({reconciliation.report['ownership_nfo_candidates']} NFOs)"
+                    elif reconciliation.report['ownership_nfo_folders_archived']:
+                        result['message'] += f"; archived {reconciliation.report['ownership_nfo_folders_archived']} owned NFO-only folders ({reconciliation.report['ownership_nfo_archived']} NFOs) to {reconciliation.report['ownership_nfo_archive_root']}"
                     if reconciliation.report['warnings']:
                         result['message'] += "; WARNING: " + "; ".join(reconciliation.report['warnings'])
                     return result

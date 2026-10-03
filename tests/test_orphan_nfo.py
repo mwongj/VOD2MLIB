@@ -47,7 +47,7 @@ def test_untracked_nfo_only_output_archives_with_nfo_writing_off(library, kind):
     assert again['reconciliation']['filter_nfo_folders_archived'] == 0
 
 
-def test_ownership_strm_only_cleanup_then_enabling_filters_archives_legacy_nfos(library):
+def test_ownership_strm_only_cleanup_archives_nfos_without_needing_filters(library):
     show = media(10, year=1934)
     library.rows['series'].append(relation(show, 'series'))
     library.rows['episodes'].append(relation(media(11, series=show, season_number=1, episode_number=1), 'episode'))
@@ -55,11 +55,12 @@ def test_ownership_strm_only_cleanup_then_enabling_filters_archives_legacy_nfos(
     root = Path(library.settings['series_root_folder'])
     nfos = {p.name: p.read_bytes() for p in root.rglob('*.nfo')}
     library.state['snapshot'] = Snapshot([owned(show, 'series')])
-    library.run('generate_series', media_library_enabled=True, deletion_scope='strm')
-    assert not list(root.rglob('*.strm')) and list(root.rglob('*.nfo'))
+    removed = library.run('generate_series', media_library_enabled=True, deletion_scope='strm')
+    assert not list(root.rglob('*.strm')) and not list(root.rglob('*.nfo'))
+    assert removed['reconciliation']['ownership_nfo_folders_archived'] == 1
     result = library.run('generate_series', media_library_enabled=True,
                          series_earliest_year='2000', generate_series_nfo=False)
-    assert result['reconciliation']['filter_nfo_folders_archived'] == 1
+    assert result['reconciliation']['filter_nfo_folders_archived'] == 0
     assert not list(root.rglob('*.nfo'))
     assert {p.name: p.read_bytes() for p in archived(library).rglob('*.nfo')} == nfos
 
@@ -234,3 +235,110 @@ def test_nfo_settings_section_matches_manifest_and_preserves_defaults():
         'generate_nfo', 'generate_series_nfo', 'nfo_omit_title']
     assert all(next(field for field in Plugin.fields if field['id'] == key)['default']
                for key in ['generate_nfo', 'generate_series_nfo'])
+
+
+@pytest.mark.parametrize('kind', ['movie', 'series'])
+def test_owned_legacy_nfo_only_folder_archives_without_active_filters(library, kind):
+    obj, folder = leftovers(library, kind, year=2026)
+    library.state['snapshot'] = Snapshot([owned(obj, kind)])
+    result = library.run('generate_series' if kind == 'series' else 'generate_movies',
+                         media_library_enabled=True, generate_nfo=False, generate_series_nfo=False)
+    assert result['reconciliation']['ownership_nfo_folders_archived'] == 1
+    assert result['reconciliation']['ownership_nfo_archived'] == 2
+    assert result['reconciliation']['filter_nfo_folders_archived'] == 0
+    assert not folder.exists() and not library.calls
+
+
+def test_owned_orphan_episode_nfos_without_tvshow_nfo_archives(library):
+    obj, folder = leftovers(library, year=2026)
+    (folder / 'tvshow.nfo').unlink()
+    library.state['snapshot'] = Snapshot([owned(obj, 'series', [(1, 1), (1, 2)])])
+    result = library.run('generate_series', media_library_enabled=True)
+    assert result['reconciliation']['ownership_nfo_archived'] == 1
+    assert not folder.exists() and len(list(archived(library).rglob('*.nfo'))) == 1
+
+
+@pytest.mark.parametrize('scope', ['strm', 'strm_nfo'])
+def test_owned_preview_matches_archives_after_planned_strm_deletion(library, scope):
+    library.rows['movies'].append(relation(media(10)))
+    library.run()
+    root = Path(library.settings['root_folder'])
+    nfo = next(root.rglob('*.nfo'));nfo.write_text('Emby-edited metadata')
+    library.state['snapshot'] = Snapshot([owned(media(10))])
+    preview = library.run('preview_cleanup', media_library_enabled=True, deletion_scope=scope)
+    assert preview['reconciliation']['ownership_nfo_folders_candidates'] == 1
+    assert preview['reconciliation']['ownership_nfo_candidates'] == 1 and nfo.exists()
+    result = library.run(media_library_enabled=True, deletion_scope=scope)
+    assert result['reconciliation']['ownership_nfo_archived'] == 1 and not nfo.exists()
+    assert next(archived(library).rglob(nfo.name)).read_text() == 'Emby-edited metadata'
+
+
+def test_filter_and_ownership_preview_never_double_count_same_folder(library):
+    obj, _ = leftovers(library)
+    library.state['snapshot'] = Snapshot([owned(obj, 'series')])
+    preview = library.run('preview_cleanup', media_library_enabled=True, series_earliest_year='2020')
+    assert preview['reconciliation']['filter_nfo_folders_candidates'] == 1
+    assert preview['reconciliation']['ownership_nfo_folders_candidates'] == 0
+
+
+def test_episode_mode_preserves_nfo_only_show_for_missing_episodes(library):
+    obj, folder = leftovers(library, year=2026)
+    library.state['snapshot'] = Snapshot([owned(obj, 'series', [(1, 1)])])
+    result = library.run('generate_series', media_library_enabled=True, media_tv_mode='episodes')
+    assert result['reconciliation']['ownership_nfo_folders_archived'] == 0 and folder.exists()
+
+
+@pytest.mark.parametrize('settings', [{'media_library_enabled': False},
+    {'media_library_enabled': True, 'media_duplicate_cleanup': 'manual'},
+    {'media_library_enabled': True, 'media_duplicate_cleanup': 'rescan'}])
+def test_ownership_archiving_obeys_enabled_integration_and_cleanup_timing(library, settings):
+    obj, folder = leftovers(library, year=2026)
+    library.state['snapshot'] = Snapshot([owned(obj, 'series')])
+    result = library.run('generate_series', **settings)
+    assert result['reconciliation']['ownership_nfo_folders_archived'] == 0 and folder.exists()
+
+
+def test_selective_cleanup_explicitly_applies_manual_ownership_archival(library):
+    obj, folder = leftovers(library, year=2026)
+    library.state['snapshot'] = Snapshot([owned(obj, 'series')])
+    result = library.run('selective_cleanup', media_library_enabled=True, media_duplicate_cleanup='manual')
+    assert result['reconciliation']['ownership_nfo_folders_archived'] == 1 and not folder.exists()
+
+
+def test_failed_emby_snapshot_does_not_archive_ownership_metadata(library):
+    _, folder = leftovers(library, year=2026)
+    library.state['error'] = OSError('Emby offline')
+    result = library.run('generate_series', media_library_enabled=True)
+    assert result['reconciliation']['ownership_nfo_folders_archived'] == 0 and folder.exists()
+
+
+def test_conflicting_provider_ids_protect_nfo_folder(library):
+    from media_library import Identity, OwnedMedia
+    obj, folder = leftovers(library, year=2026, imdb_id='native-imdb')
+    library.state['snapshot'] = Snapshot([OwnedMedia(Identity('series', obj.name, obj.year,
+                                                       obj.tmdb_id, 'conflicting-imdb'))])
+    result = library.run('generate_series', media_library_enabled=True)
+    assert result['reconciliation']['ownership_nfo_folders_archived'] == 0 and folder.exists()
+
+
+def test_owned_orphan_scope_matches_existing_cleanup_in_both_roots(library):
+    obj, folder = leftovers(library, year=2026)
+    library.state['snapshot'] = Snapshot([owned(obj, 'series')])
+    result = library.run('generate_movies', media_library_enabled=True)
+    assert result['reconciliation']['ownership_nfo_folders_archived'] == 1 and not folder.exists()
+
+
+def test_failed_native_ownership_lookup_preserves_tracked_strms(library, monkeypatch):
+    library.rows['movies'].append(relation(media(10)))
+    library.run()
+    library.state['snapshot'] = Snapshot([owned(media(10))])
+    original = Query.values_list
+    def fail(self, *fields):
+        if 'category__name' in fields:
+            raise OSError('native path lookup failed')
+        return original(self, *fields)
+    monkeypatch.setattr(Query, 'values_list', fail)
+    result = library.run(media_library_enabled=True)
+    assert result['reconciliation']['ownership_nfo_folders_archived'] == 0
+    assert list(Path(library.settings['root_folder']).rglob('*.strm'))
+    assert any('server cleanup disabled' in warning for warning in result['reconciliation']['warnings'])
