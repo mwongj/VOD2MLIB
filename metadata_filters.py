@@ -16,6 +16,18 @@ def genre_names(value):
     return frozenset(s.strip().casefold() for s in (value or '').split(',') if s.strip())
 
 
+def title_pattern(settings, key):
+    value = settings.get(key)
+    if value is None or isinstance(value, str) and not value.strip():
+        return None
+    if not isinstance(value, str):
+        raise ValueError(f'{key} must be a regular expression')
+    try:
+        return re.compile(value, re.IGNORECASE)
+    except re.error as error:
+        raise ValueError(f'{key} is not a valid regular expression: {error}') from error
+
+
 def score(value):
     try:
         result = float(value) if not isinstance(value, bool) else float('nan')
@@ -37,8 +49,10 @@ class Rules:
     missing: str = 'keep'
     include: frozenset = frozenset()
     exclude: frozenset = frozenset()
+    title_include: re.Pattern | None = None
+    title_exclude: re.Pattern | None = None
 
-    def evaluate(self, rating=None, release_year=None, genre=None):
+    def evaluate(self, rating=None, release_year=None, genre=None, title=None):
         rejected, unknown = [], []
         if self.minimum_score is not None:
             actual = score(rating)
@@ -62,6 +76,13 @@ class Rules:
                 if self.missing == 'reject': rejected.append('genre')
             elif actual & self.exclude or (self.include and not actual & self.include):
                 rejected.append('genre')
+        if self.title_include or self.title_exclude:
+            if title is None or not title.strip():
+                unknown.append('title')
+                if self.missing == 'reject': rejected.append('title')
+            elif ((self.title_exclude and self.title_exclude.search(title))
+                  or (self.title_include and not self.title_include.search(title))):
+                rejected.append('title')
         return not rejected, tuple(rejected), tuple(unknown)
 
 
@@ -95,7 +116,9 @@ def configuration(settings):
             raise ValueError(f'{kind}_missing_metadata must be keep or reject')
         rules[kind] = Rules(**values, missing=policy,
             include=genre_names(settings.get('series_genre_include')) if kind == 'series' else frozenset(),
-            exclude=genre_names(settings.get('series_genre_exclude')) if kind == 'series' else frozenset())
+            exclude=genre_names(settings.get('series_genre_exclude')) if kind == 'series' else frozenset(),
+            title_include=title_pattern(settings, f'{kind}_title_include'),
+            title_exclude=title_pattern(settings, f'{kind}_title_exclude'))
     return rules
 
 
@@ -103,7 +126,7 @@ SECTION = dict(
     id='_section_metadata_filters',
     label='[METADATA FILTERS]',
     type='info',
-    description='Filter movies and series independently by score and year, and series by genre, '
+    description='Filter movies and series independently by score, year, and title regex, and series by genre, '
                 'using Dispatcharr metadata. Blank rules are disabled; unknown metadata is kept '
                 'by default. Existing files remain in place. Re-click Apply / Update after changing '
                 'settings to update the schedule.',
@@ -121,6 +144,12 @@ for _kind in ('movie', 'series'):
     FIELDS.append(dict(id=f'{_kind}_missing_metadata', label=f'Missing Metadata ({_kind.title()})',
         type='select', default='keep', options=[{'value': 'keep', 'label': 'Keep unknowns'},
         {'value': 'reject', 'label': 'Reject unknowns'}], help_text='Applies only to enabled metadata rules. Uses Dispatcharr model metadata.'))
+    for _suffix in ('include', 'exclude'):
+        FIELDS.append(dict(id=f'{_kind}_title_{_suffix}', label=f'Title {_suffix.title()} Regex ({_kind.title()})',
+            type='string', default='',
+            help_text=r'Case-insensitive regular expression searched in the original Dispatcharr title before cleanup. '
+                      r'Use ^\s*(AF|AR)\s*[-:|]\s* for provider prefixes or ^\s*\[(AF|AR)\]\s* for bracketed tags. '
+                      r'Include requires a match; exclude rejects a match and wins over include. Blank disables.'))
 for _suffix in ('include', 'exclude'):
     FIELDS.append(dict(id=f'series_genre_{_suffix}', label=f'Genre {_suffix.title()} (Series)',
         type='string', default='', help_text='Comma-separated complete genre names, case-insensitive. Compound names remain intact. Any include qualifies; any exclude rejects. Blank disables.'))
@@ -131,7 +160,12 @@ SETTING_KEYS = tuple(field['id'] for field in FIELDS)
 def metadata_fields(kind):
     fields = [f'{kind}__rating', f'{kind}__year']
     if kind == 'series': fields.append('series__genre')
+    fields.append(f'{kind}__name')
     return fields
+
+
+def evaluate_metadata(rules, kind, values):
+    return rules.evaluate(values[0], values[1], values[2] if kind == 'series' else None, values[-1])
 
 
 def passing_relations(query, kind, rules):
@@ -140,7 +174,7 @@ def passing_relations(query, kind, rules):
     while True:
         rows = list(islice(iterator, BATCH_SIZE))
         if not rows: return
-        ids = [row[0] for row in rows if rules.evaluate(*row[1:])[0]]
+        ids = [row[0] for row in rows if evaluate_metadata(rules, kind, row[1:])[0]]
         for offset in range(0, len(ids), LOOKUP_BATCH_SIZE):
             group = ids[offset:offset + LOOKUP_BATCH_SIZE]
             models = {rel.id: rel for rel in query.filter(id__in=group)}
@@ -150,11 +184,11 @@ def passing_relations(query, kind, rules):
 
 def catalogue_counts(query, kind, rules):
     counts = dict(eligible=0, passing=0, rejected_score=0, rejected_year=0,
-                  rejected_genre=0, retained_unknown=0)
+                  rejected_genre=0, rejected_title=0, retained_unknown=0)
     # Unique model IDs, not provider relations. SQL distinct bounds Python memory.
     rows = query.order_by().values_list(f'{kind}_id', *metadata_fields(kind)).distinct()
     for row in rows.iterator(chunk_size=BATCH_SIZE):
-        passed, rejected, unknown = rules.evaluate(*row[1:])
+        passed, rejected, unknown = evaluate_metadata(rules, kind, row[1:])
         counts['eligible'] += 1
         counts['passing'] += int(passed)
         counts['retained_unknown'] += int(passed and bool(unknown))

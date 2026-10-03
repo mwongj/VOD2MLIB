@@ -909,5 +909,5 @@ class Reconciliation:
         return str(ep.uuid), signature(self.settings, [
             rel.m3u_account_id, rel.stream_id, str(ep.uuid), ep.name,
             ep.season_number, ep.episode_number, path,
-            series.rating, series.year, series.genre,
+            series.rating, series.year, series.genre, series.name,
         ])

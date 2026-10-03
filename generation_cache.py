@@ -62,7 +62,7 @@ def movie_candidates(rec, query, settings):
         changed = []
         for row in rows:
             rec.report['generation_checked'] += 1
-            if not rules.evaluate(row[10], row[5])[0]:
+            if not rules.evaluate(row[10], row[5], title=row[4])[0]:
                 continue
             if seen is not None:
                 if row[3] in seen:

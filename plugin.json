@@ -442,7 +442,7 @@
       "id": "_section_metadata_filters",
       "label": "[METADATA FILTERS]",
       "type": "info",
-      "description": "Filter movies and series independently by score and year, and series by genre, using Dispatcharr metadata. Blank rules are disabled; unknown metadata is kept by default. Existing files remain in place. Re-click Apply / Update after changing settings to update the schedule."
+      "description": "Filter movies and series independently by score, year, and title regex, and series by genre, using Dispatcharr metadata. Blank rules are disabled; unknown metadata is kept by default. Existing files remain in place. Re-click Apply / Update after changing settings to update the schedule."
     },
     {
       "id": "movie_minimum_score",
@@ -483,6 +483,20 @@
       "help_text": "Applies only to enabled metadata rules. Uses Dispatcharr model metadata."
     },
     {
+      "id": "movie_title_include",
+      "label": "Title Include Regex (Movie)",
+      "type": "string",
+      "default": "",
+      "help_text": "Case-insensitive regular expression searched in the original Dispatcharr title before cleanup. Use ^\\s*(AF|AR)\\s*[-:|]\\s* for provider prefixes or ^\\s*\\[(AF|AR)\\]\\s* for bracketed tags. Include requires a match; exclude rejects a match and wins over include. Blank disables."
+    },
+    {
+      "id": "movie_title_exclude",
+      "label": "Title Exclude Regex (Movie)",
+      "type": "string",
+      "default": "",
+      "help_text": "Case-insensitive regular expression searched in the original Dispatcharr title before cleanup. Use ^\\s*(AF|AR)\\s*[-:|]\\s* for provider prefixes or ^\\s*\\[(AF|AR)\\]\\s* for bracketed tags. Include requires a match; exclude rejects a match and wins over include. Blank disables."
+    },
+    {
       "id": "series_minimum_score",
       "label": "Minimum Score (Series)",
       "type": "string",
@@ -519,6 +533,20 @@
         }
       ],
       "help_text": "Applies only to enabled metadata rules. Uses Dispatcharr model metadata."
+    },
+    {
+      "id": "series_title_include",
+      "label": "Title Include Regex (Series)",
+      "type": "string",
+      "default": "",
+      "help_text": "Case-insensitive regular expression searched in the original Dispatcharr title before cleanup. Use ^\\s*(AF|AR)\\s*[-:|]\\s* for provider prefixes or ^\\s*\\[(AF|AR)\\]\\s* for bracketed tags. Include requires a match; exclude rejects a match and wins over include. Blank disables."
+    },
+    {
+      "id": "series_title_exclude",
+      "label": "Title Exclude Regex (Series)",
+      "type": "string",
+      "default": "",
+      "help_text": "Case-insensitive regular expression searched in the original Dispatcharr title before cleanup. Use ^\\s*(AF|AR)\\s*[-:|]\\s* for provider prefixes or ^\\s*\\[(AF|AR)\\]\\s* for bracketed tags. Include requires a match; exclude rejects a match and wins over include. Blank disables."
     },
     {
       "id": "series_genre_include",
