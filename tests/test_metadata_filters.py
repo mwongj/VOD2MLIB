@@ -89,10 +89,11 @@ def test_filtered_existing_titles_are_still_present_upstream(library):
     library.rows['movies'].append(relation(media(1, rating='2')))
     assert library.run()['created_strm'] == 1
     path = next(Path(library.settings['root_folder']).rglob('*.strm'))
-    before = path.read_bytes(), path.stat().st_mtime_ns
     result = library.run('rescan_all', movie_minimum_score='8', m3u_cleanup_enabled=True)
-    assert result['reconciliation']['deleted'] == 0
-    assert (path.read_bytes(), path.stat().st_mtime_ns) == before
+    assert result['reconciliation']['deleted'] == 1
+    assert result['reconciliation']['filter_deleted'] == 1
+    assert not path.exists()
+    assert len(library.rows['movies']) == 1
 
 
 def test_preview_matches_candidates_and_counts_unknown(monkeypatch):
@@ -138,7 +139,7 @@ def test_series_metadata_and_settings_invalidate_episode_decisions(library):
     assert library.run('generate_series', refresh_existing=True, series_minimum_score='7')['reconciliation']['generation_unchanged'] == 0
 
 
-def test_old_schedule_warns_about_new_active_filters():
+def test_schedule_filter_changes_are_live_without_snapshot_drift():
     from types import SimpleNamespace
     task = SimpleNamespace(kwargs=json.dumps({'settings': {'batch_size': 'all'}}))
     defaults = {field['id']: field['default'] for field in FIELDS}
@@ -146,8 +147,7 @@ def test_old_schedule_warns_about_new_active_filters():
     assert p._settings_drift_keys(task, {'batch_size': 'all', **defaults}) == []
     current = {'batch_size': 'all', **defaults, 'movie_earliest_year': '2000',
                'series_earliest_year': '2010', 'series_genre_exclude': 'Horror'}
-    assert p._settings_drift_keys(task, current) == [
-        'movie_earliest_year', 'series_earliest_year', 'series_genre_exclude']
+    assert p._settings_drift_keys(task, current) == []
     task.kwargs = json.dumps({'settings': current})
     assert p._settings_drift_keys(task, current) == []
 
@@ -215,10 +215,9 @@ def test_title_filters_precede_series_fetch_and_reject_before_cleanup(library):
     assert result['episodes_created'] == 1 and len(library.calls) == 1
     assert library.run('generate_series')['episodes_created'] == 1
     paths = list(Path(library.settings['series_root_folder']).rglob('*.strm'))
-    before = {str(path): (path.read_bytes(), path.stat().st_mtime_ns) for path in paths}
     result = library.run('rescan_all', series_title_exclude='.*', m3u_cleanup_enabled=True)
-    assert result['reconciliation']['deleted'] == 0
-    assert before == {str(path): (path.read_bytes(), path.stat().st_mtime_ns) for path in paths}
+    assert result['reconciliation']['filter_deleted'] == 2
+    assert not any(path.exists() for path in paths)
 
 
 def test_title_snapshot_matches_generation_candidates(monkeypatch):
@@ -231,10 +230,10 @@ def test_title_snapshot_matches_generation_candidates(monkeypatch):
     assert counts['rejected_title'] == 1 and counts['retained_unknown'] == 1
 
 
-def test_new_title_rule_reports_schedule_drift():
+def test_new_title_rule_is_live_without_schedule_drift():
     from types import SimpleNamespace
     task = SimpleNamespace(kwargs=json.dumps({'settings': {}}))
-    assert Plugin()._settings_drift_keys(task, {'series_title_exclude': '^AR'}) == ['series_title_exclude']
+    assert Plugin()._settings_drift_keys(task, {'series_title_exclude': '^AR'}) == []
 
 
 def test_genre_lists_keep_regex_characters_literal():

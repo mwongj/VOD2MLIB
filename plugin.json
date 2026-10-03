@@ -1,6 +1,6 @@
 {
   "name": "VOD to Media Library",
-  "version": "1.20.0-rc.5",
+  "version": "1.20.0-rc.6",
   "description": "VOD → media library bridge. Generates .strm + NFO files from Dispatcharr's VOD catalogue, with optional cron-driven auto-rescan that picks up newly-added episodes.",
   "author": "R3XCHRIS",
   "license": "MIT",
@@ -475,7 +475,7 @@
       "id": "_section_metadata_filters",
       "label": "[METADATA FILTERS]",
       "type": "info",
-      "description": "Filter movies and series independently by score, year, and title regex, and series by genre, using Dispatcharr metadata. Blank rules are disabled; unknown metadata is kept by default. Existing files remain in place. Re-click Apply / Update after changing settings to update the schedule."
+      "description": "Filter movies and series independently by score, year, and title regex, and series by genre, using Dispatcharr metadata. Blank rules are disabled; unknown metadata is kept by default. The next generation run removes verified generated STRMs and NFOs that fail current filters, while preserving edited files. Scheduled runs use current saved filters automatically."
     },
     {
       "id": "movie_minimum_score",
@@ -628,7 +628,7 @@
     {
       "id": "generate_movies",
       "label": "[GENERATE] Movies",
-      "description": "Process movies per Batch Size. Existing .strm files are skipped.",
+      "description": "Remove verified output failing current movie filters, then generate per Batch Size.",
       "button_label": "Generate",
       "button_variant": "filled",
       "button_color": "green"
@@ -636,7 +636,7 @@
     {
       "id": "generate_series",
       "label": "[GENERATE] Series",
-      "description": "Create episode .strm files. See 'Refresh Existing Series' setting.",
+      "description": "Remove verified output failing current series filters, then generate episode files.",
       "button_label": "Generate",
       "button_variant": "filled",
       "button_color": "green"
@@ -644,7 +644,7 @@
     {
       "id": "rescan_all",
       "label": "[GENERATE] Full rescan",
-      "description": "Rescan then force regenerate Movies + Series.",
+      "description": "Apply current filters to existing output, then rescan Movies and Series.",
       "button_label": "Rescan all",
       "button_variant": "filled",
       "button_color": "teal",
@@ -678,7 +678,7 @@
     {
       "id": "apply_schedule",
       "label": "[SCHEDULE] Apply / Update",
-      "description": "Register or update the cron task. Re-click after changing any setting.",
+      "description": "Register or update the cron task. Re-apply after operational changes; filters are read live.",
       "button_label": "Apply",
       "button_variant": "outline",
       "button_color": "blue"

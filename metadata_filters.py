@@ -128,8 +128,9 @@ SECTION = dict(
     type='info',
     description='Filter movies and series independently by score, year, and title regex, and series by genre, '
                 'using Dispatcharr metadata. Blank rules are disabled; unknown metadata is kept '
-                'by default. Existing files remain in place. Re-click Apply / Update after changing '
-                'settings to update the schedule.',
+                'by default. The next generation run removes verified generated STRMs and NFOs '
+                'that fail current filters, while preserving edited files. Scheduled runs use '
+                'current saved filters automatically.',
 )
 
 FIELDS = []

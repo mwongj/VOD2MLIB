@@ -19,6 +19,7 @@ from urllib.parse import parse_qs, urlparse
 try:
     from .inventory import BATCH_SIZE, LOOKUP_BATCH_SIZE, InventoryStore, contained, strm_contents
     from .generation_cache import movie_candidates, signature
+    from .filter_cleanup import cleanup as cleanup_filters, applies as filters_apply, FilterCleanupError
     from .media_library import (
         Identity,
         LibrarySelectionError,
@@ -28,6 +29,7 @@ try:
 except ImportError:
     from inventory import BATCH_SIZE, LOOKUP_BATCH_SIZE, InventoryStore, contained, strm_contents
     from generation_cache import movie_candidates, signature
+    from filter_cleanup import cleanup as cleanup_filters, applies as filters_apply, FilterCleanupError
     from media_library import (
         Identity,
         LibrarySelectionError,
@@ -105,6 +107,14 @@ class Reconciliation:
             "generation_deduped": 0,
             "series_completed": 0,
             "provider_imports_skipped": 0,
+            "filter_checked": 0,
+            "filter_candidates": 0,
+            "filter_deleted": 0,
+            "filter_preserved": 0,
+            "filter_missing": 0,
+            "filter_errors": 0,
+            "filter_movie_deleted": 0,
+            "filter_series_deleted": 0,
             "episodes_evaluated": 0,
             "source_presence_requested": 0,
             "source_presence_found": 0,
@@ -287,6 +297,7 @@ class Reconciliation:
                     self.census(metadata=True)
             with self.measure("legacy_adoption"):
                 self.adopt(roots=roots)
+            cleanup_filters(self, action)
             refreshed = False
             if m3u:
                 # Include sources adopted during initial discovery, and use the
@@ -303,7 +314,11 @@ class Reconciliation:
                 with self.measure("catalogue"):
                     self.census(metadata=False)
             self.m3u_complete = m3u
+        except FilterCleanupError:
+            raise
         except Exception as error:
+            if filters_apply(self.settings, action) and not getattr(self, 'filter_cleanup_active', False):
+                raise FilterCleanupError('Generated-file discovery failed; filters were not applied') from error
             self.m3u_complete = False
             self.warning(
                 f"Catalogue check incomplete; M3U cleanup disabled ({type(error).__name__})"
@@ -820,7 +835,7 @@ class Reconciliation:
         self.progress(
             "Previewing cleanup" if dry_run else "Reconciling generated files"
         )
-        for row in self.store.rows():
+        for row in self.store.rows(skip_filters=getattr(self, 'filter_cleanup_active', False)):
             identity = Identity(
                 row["kind"], row["title"], row["year"], row["tmdb"], row["imdb"]
             )

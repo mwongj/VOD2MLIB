@@ -173,7 +173,7 @@ VOD category selection uses Dispatcharr’s native per-account category settings
 4. Verify with `[SCHEDULE] Show status` — last run / total runs populate after the first cron tick.
 5. Optional: click `[SCHEDULE] Test fire now` to immediately replay the scheduled action without waiting for the next cron tick.
 
-The cron snapshots your settings at click-time. **Re-click Apply after changing any setting** to refresh the snapshot.
+The cron snapshots operational settings at click-time. **Re-click Apply after changing paths, batching, concurrency, integration, or cleanup settings**. Metadata and title filters are read from the latest saved settings at each scheduled run; filter changes do not require Apply.
 
 ## Plex compatibility
 
@@ -316,9 +316,9 @@ Filters read Dispatcharr model metadata directly, without NFOs, Emby enrichment,
 
 **Catalogue snapshot** reports separate movie/series eligible and passing title counts, rejected counts for score/year/genre/title, and passing titles retained with unknown metadata. Counts use unique titles after native account/category eligibility and precede existing-library checks. A title failing multiple rules counts against each, so rejection counts can overlap.
 
-Filtering happens before deduplication, batch selection, and episode fetching. Rejected titles create no output and are not refreshed. Existing files remain in place: metadata filters never establish upstream removal, and source-presence cleanup continues to check the complete unfiltered Dispatcharr catalogue. Existing Emby/M3U cleanup policies still apply independently. Incremental decisions include filter settings and relevant metadata, so later changes are reevaluated.
+Each generation run first applies current filters to tracked output for its media type, independently of the creation batch limit. Verified generated STRMs that fail are removed, along with matching generated NFOs; edited or unverified files are preserved. Full rescan covers movies and series. **Preview cleanup** reports filter removal candidates without changing files. If any tracked source passes, or a source cannot be resolved, shared output is retained. Missing model metadata follows the configured policy. All bounded metadata lookups must finish before filter deletion begins. Filter removal is separate from upstream absence: source-presence cleanup still checks the complete unfiltered catalogue. Existing Emby/M3U cleanup policies apply independently. Rejected candidates are excluded before deduplication, batch selection, and episode fetching. Incremental signatures include filter settings and metadata so relaxing filters can recreate eligible output.
 
-Save settings and run **Catalogue snapshot** to inspect eligibility. Re-click **Apply / Update** after changing filter settings so the schedule captures the new values.
+Save settings and run **Catalogue snapshot** to inspect eligibility, or **Preview cleanup** to inspect existing-file removals. The next manual or scheduled run uses current saved filters. Filter cleanup telemetry reports checked, candidate, deleted, missing, preserved, and error counts; series deletion counts represent episode STRMs. Verified filter NFO removal is automatic and preserves edited or unverified NFOs, independently of the separate cleanup deletion-scope setting.
 
 
 Parallel Series Workers (under SERIES) defaults to 3 and accepts 1-6 workers. It controls series refresh/generation concurrency; movie concurrency stays at 3. Worker-count changes do not invalidate output signatures. Apply/Update the schedule after changing it if scheduled runs should use the new value. Increase concurrency only after comparing the same workload and checking provider errors.

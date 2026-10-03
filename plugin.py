@@ -1,7 +1,7 @@
 """
 VOD to Media Library — Dispatcharr VOD .strm Generator Plugin
 (slug: vod2mlib)
-v1.20.0-rc.5 — independent movie and series metadata filters.
+v1.20.0-rc.6 — independent movie and series metadata filters.
 
 MIT License
 Copyright (c) 2025-2026 shedunraid (original author)
@@ -42,7 +42,7 @@ class Plugin:
     """Generate .strm files for VOD movies from Dispatcharr."""
 
     name = "VOD to Media Library"
-    version = "1.20.0-rc.5"
+    version = "1.20.0-rc.6"
     help_url = "https://github.com/R3XCHRIS/VOD2MLIB#readme"
     description = (
         "Convert Dispatcharr VODs into media-server-friendly .strm files, with "
@@ -476,19 +476,19 @@ class Plugin:
       'button_color': 'blue'},
      {'id': 'generate_movies',
       'label': '[GENERATE] Movies',
-      'description': 'Process movies per Batch Size. Existing .strm files are skipped.',
+      'description': 'Remove verified output failing current movie filters, then generate per Batch Size.',
       'button_label': 'Generate',
       'button_variant': 'filled',
       'button_color': 'green'},
      {'id': 'generate_series',
       'label': '[GENERATE] Series',
-      'description': "Create episode .strm files. See 'Refresh Existing Series' setting.",
+      'description': "Remove verified output failing current series filters, then generate episode files.",
       'button_label': 'Generate',
       'button_variant': 'filled',
       'button_color': 'green'},
      {'id': 'rescan_all',
       'label': '[GENERATE] Full rescan',
-      'description': 'Rescan then force regenerate Movies + Series.',
+      'description': 'Apply current filters to existing output, then rescan Movies and Series.',
       'button_label': 'Rescan all',
       'button_variant': 'filled',
       'button_color': 'teal',
@@ -517,7 +517,7 @@ class Plugin:
                              'action.'}},
      {'id': 'apply_schedule',
       'label': '[SCHEDULE] Apply / Update',
-      'description': 'Register or update the cron task. Re-click after changing any setting.',
+      'description': 'Register or update the cron task. Re-apply after operational changes; filters are read live.',
       'button_label': 'Apply',
       'button_variant': 'outline',
       'button_color': 'blue'},
@@ -607,7 +607,9 @@ class Plugin:
                     with reconciliation.measure("inventory_drain"):
                         reconciliation.drain()
                     result['reconciliation'] = reconciliation.report
-                    result['message'] += f"; excluded {reconciliation.report['excluded']}, deleted {reconciliation.report['deleted']}, cleanup errors {reconciliation.report['errors']}"
+                    result['message'] += f"; excluded {reconciliation.report['excluded']}, deleted {reconciliation.report['deleted']} ({reconciliation.report['filter_deleted']} by filters), cleanup errors {reconciliation.report['errors']}"
+                    if action == 'preview_cleanup':
+                        result['message'] += f"; filter removal candidates {reconciliation.report['filter_candidates']}"
                     if reconciliation.report['warnings']:
                         result['message'] += "; WARNING: " + "; ".join(reconciliation.report['warnings'])
                     return result
@@ -2384,7 +2386,7 @@ class Plugin:
         logger.info("%s schedule: %s @ '%s' (%s) → action '%s'", verb, self.SCHEDULE_TASK_NAME, cron_expr, tz_str, target)
         logger.info("Settings snapshot keys: %s", sorted(snapshot.keys()))
         logger.info("")
-        logger.info("Note: re-run 'Apply Schedule' after changing settings to refresh the snapshot.")
+        logger.info("Filters are read live at run start. Re-apply after changing other schedule settings.")
 
         warning = ""
         refresh_on = bool(snapshot.get("refresh_existing", False))
@@ -2490,9 +2492,8 @@ class Plugin:
         """Return the list of setting keys whose live value differs from the
         snapshot stored in the PeriodicTask at the last Apply Schedule.
 
-        Compare snapshot keys, plus metadata filters changed from their defaults
-        when absent from an older snapshot. An upgrade with inactive filters does
-        not raise a false warning. `schedule_` keys are cron configuration.
+        Compare operational snapshot keys, excluding filters which are read live
+        at task start. `schedule_` keys configure the cron itself.
         """
         import json
         try:
@@ -2503,13 +2504,23 @@ class Plugin:
             k: v for k, v in (current_settings or {}).items()
             if not k.startswith("schedule_")
         }
-        changed = {k for k in stored if stored.get(k) != current.get(k)}
-        changed.update(
-            field['id'] for field in [*FILTER_FIELDS, {'id': 'series_workers', 'default': '3'}]
-            if field['id'] not in stored
-            and current.get(field['id'], field['default']) != field['default']
-        )
+        filter_keys = {field['id'] for field in FILTER_FIELDS}
+        changed = {k for k in stored if k not in filter_keys and stored.get(k) != current.get(k)}
+        if 'series_workers' not in stored and current.get('series_workers', '3') != '3':
+            changed.add('series_workers')
         return sorted(changed)
+
+    @staticmethod
+    def _scheduled_settings(snapshot):
+        # Operational schedule settings retain their applied snapshot. Filters
+        # always reflect the user's latest saved choices, including cleared rules.
+        from apps.plugins.models import PluginConfig
+        saved = PluginConfig.objects.get(key='vod2mlib').settings or {}
+        settings = dict(snapshot or {})
+        settings.update({field['id']: saved.get(field['id'], field['default'])
+                         for field in FILTER_FIELDS})
+        configuration(settings)
+        return settings
 
     def _schedule_test_fire(self, settings: Dict[str, Any], logger):
         """Enqueue the registered schedule's task on Celery, returning immediately.
@@ -2535,7 +2546,7 @@ class Plugin:
             return {"status": "error", "message": f"Stored task kwargs invalid JSON: {e}"}
 
         action = kwargs.get("action") or "rescan_all"
-        snapshot_settings = kwargs.get("settings") or {}
+        snapshot_settings = self._scheduled_settings(kwargs.get("settings") or {})
 
         if action not in self._valid_schedule_targets():
             return {"status": "error", "message": f"Stored action '{action}' is not a valid target."}
@@ -2575,7 +2586,7 @@ try:
         """
         import logging
         logger = logging.getLogger("vod2mlib.schedule")
-        result = action_runner.run_and_wait(action, {}, settings or {})
+        result = action_runner.run_and_wait(action, {}, Plugin._scheduled_settings(settings))
         try:
             from django.utils import timezone
             from django_celery_beat.models import PeriodicTask

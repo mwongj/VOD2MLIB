@@ -228,8 +228,11 @@ class InventoryStore:
             )
             self.db.executemany("INSERT OR IGNORE INTO sources VALUES (?,?)", sources)
 
-    def rows(self, batch=BATCH_SIZE):
-        cursor = self.db.execute("SELECT * FROM files ORDER BY path")
+    def rows(self, batch=BATCH_SIZE, skip_filters=False):
+        sql = 'SELECT f.* FROM files f'
+        if skip_filters:
+            sql += ' WHERE NOT EXISTS (SELECT 1 FROM filter_handled h WHERE h.path=f.path)'
+        cursor = self.db.execute(sql + ' ORDER BY f.path')
         while True:
             rows = cursor.fetchmany(batch)
             if not rows:
