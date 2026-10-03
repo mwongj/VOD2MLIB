@@ -85,6 +85,24 @@ def test_nondefault_worker_count_reports_schedule_drift(library):
     assert 'series_workers' in library.p._settings_drift_keys(task, {'series_workers': '6'})
 
 
+def test_drain_frees_checkpoints_before_inventory_and_never_commits_after_failure(library, monkeypatch):
+    rec = Reconciliation(library.p, library.settings, LOG, library.tmp / 'drain-slots')
+    rec.queue.put(('pending record',))
+    rec.cache_queue.put(('episode', 'source', 'signature', '/pending'))
+    def fail(records):
+        assert rec.cache_queue.empty() and rec.queue.empty()
+        assert rec.store.db.execute('SELECT COUNT(*) FROM generation_entries').fetchone()[0] == 0
+        raise OSError('Inventory write failed')
+    monkeypatch.setattr(rec.store, 'record_many', fail)
+    try:
+        with pytest.raises(OSError, match='Inventory write failed'):
+            rec.drain()
+        assert rec.cancelled.is_set()
+        assert rec.store.db.execute('SELECT COUNT(*) FROM generation_entries').fetchone()[0] == 0
+    finally:
+        rec.store.close()
+
+
 def test_series_generation_reports_work_and_avoids_repeated_directory_setup(library, monkeypatch):
     show = media(10)
     library.rows['series'].append(relation(show, 'series'))

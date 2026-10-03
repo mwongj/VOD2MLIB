@@ -897,6 +897,16 @@ class Reconciliation:
         raise RuntimeError("Inventory writes cancelled after action failure")
 
     def drain(self):
+        # Free checkpoint slots before slow inventory verification. Capture
+        # checkpoints first: each producer queues its record before its decision,
+        # so their pending records are already in the bounded record queue below.
+        # Persist decisions only after record_many succeeds.
+        decisions = []
+        while len(decisions) < BATCH_SIZE:
+            try:
+                decisions.append(self.cache_queue.get_nowait())
+            except Empty:
+                break
         records = []
         while len(records) < BATCH_SIZE:
             try:
@@ -912,12 +922,6 @@ class Reconciliation:
                 self.inventory_write_failed = True
                 self.cancelled.set()
                 raise
-        decisions = []
-        while len(decisions) < BATCH_SIZE:
-            try:
-                decisions.append(self.cache_queue.get_nowait())
-            except Empty:
-                break
         if decisions and not self.inventory_write_failed:
             with self.measure('inventory_checkpoint', len(decisions), worker=True), self.store.db:
                 self.store.db.executemany(
