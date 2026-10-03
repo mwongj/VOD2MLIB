@@ -136,3 +136,17 @@ def test_series_metadata_and_settings_invalidate_episode_decisions(library):
     show.rating = '9'
     assert library.run('generate_series', refresh_existing=True)['reconciliation']['generation_unchanged'] == 0
     assert library.run('generate_series', refresh_existing=True, series_minimum_score='7')['reconciliation']['generation_unchanged'] == 0
+
+
+def test_old_schedule_warns_about_new_active_filters():
+    from types import SimpleNamespace
+    task = SimpleNamespace(kwargs=json.dumps({'settings': {'batch_size': 'all'}}))
+    defaults = {field['id']: field['default'] for field in FIELDS}
+    p = Plugin()
+    assert p._settings_drift_keys(task, {'batch_size': 'all', **defaults}) == []
+    current = {'batch_size': 'all', **defaults, 'movie_earliest_year': '2000',
+               'series_earliest_year': '2010', 'series_genre_exclude': 'Horror'}
+    assert p._settings_drift_keys(task, current) == [
+        'movie_earliest_year', 'series_earliest_year', 'series_genre_exclude']
+    task.kwargs = json.dumps({'settings': current})
+    assert p._settings_drift_keys(task, current) == []

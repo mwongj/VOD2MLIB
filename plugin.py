@@ -2445,10 +2445,9 @@ class Plugin:
         """Return the list of setting keys whose live value differs from the
         snapshot stored in the PeriodicTask at the last Apply Schedule.
 
-        Compared over the SNAPSHOT's keys only (intersection), so newly-added
-        settings introduced by a plugin upgrade don't raise a false "changed"
-        flag for users who never touched them. `schedule_`-prefixed keys are
-        excluded — they're cron config, not part of the rescan snapshot.
+        Compare snapshot keys, plus metadata filters changed from their defaults
+        when absent from an older snapshot. An upgrade with inactive filters does
+        not raise a false warning. `schedule_` keys are cron configuration.
         """
         import json
         try:
@@ -2459,7 +2458,13 @@ class Plugin:
             k: v for k, v in (current_settings or {}).items()
             if not k.startswith("schedule_")
         }
-        return sorted(k for k in stored if stored.get(k) != current.get(k))
+        changed = {k for k in stored if stored.get(k) != current.get(k)}
+        changed.update(
+            field['id'] for field in FILTER_FIELDS
+            if field['id'] not in stored
+            and current.get(field['id'], field['default']) != field['default']
+        )
+        return sorted(changed)
 
     def _schedule_test_fire(self, settings: Dict[str, Any], logger):
         """Enqueue the registered schedule's task on Celery, returning immediately.
