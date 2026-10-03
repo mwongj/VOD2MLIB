@@ -1,7 +1,7 @@
 """
 VOD to Media Library — Dispatcharr VOD .strm Generator Plugin
 (slug: vod2mlib)
-v1.20.0-rc.4 — independent movie and series metadata filters.
+v1.20.0-rc.5 — independent movie and series metadata filters.
 
 MIT License
 Copyright (c) 2025-2026 shedunraid (original author)
@@ -21,13 +21,14 @@ from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 try:
     from .inventory import action_lock, state_directory, file_hash, contained, BATCH_SIZE
     from .reconciliation import Reconciliation
-    from . import action_runner
+    from . import action_runner, series_refresh
     from .media_library import create_adapter
     from .metadata_filters import FIELDS as FILTER_FIELDS, SECTION as FILTER_SECTION, configuration, passing_relations, catalogue_counts
 except ImportError:
     from inventory import action_lock, state_directory, file_hash, contained, BATCH_SIZE
     from reconciliation import Reconciliation
     import action_runner
+    import series_refresh
     from media_library import create_adapter
     from metadata_filters import FIELDS as FILTER_FIELDS, SECTION as FILTER_SECTION, configuration, passing_relations, catalogue_counts
 
@@ -41,7 +42,7 @@ class Plugin:
     """Generate .strm files for VOD movies from Dispatcharr."""
 
     name = "VOD to Media Library"
-    version = "1.20.0-rc.4"
+    version = "1.20.0-rc.5"
     help_url = "https://github.com/R3XCHRIS/VOD2MLIB#readme"
     description = (
         "Convert Dispatcharr VODs into media-server-friendly .strm files, with "
@@ -1442,15 +1443,12 @@ class Plugin:
 
         try:
             custom_props = series_rel.custom_properties or {}
+            refreshed_rows = None
             should_refetch = refresh_existing or not custom_props.get('episodes_fetched', False)
             if should_refetch:
                 try:
                     with rec.provider_refresh() if rec else nullcontext():
-                        refresh_series_episodes(
-                            account=series_rel.m3u_account,
-                            series=series_rel.series,
-                            external_series_id=series_rel.external_series_id,
-                        )
+                        refreshed_rows = series_refresh.refresh(series_rel, refresh_series_episodes, rec)
                 except Exception as fetch_err:
                     logger.warning("refresh_series_episodes failed for %s: %s", series_name, fetch_err)
 
@@ -1458,7 +1456,7 @@ class Plugin:
             # duplicate relations for one episode varies run to run, so the
             # same .strm would flip between provider URLs on every rescan.
             with rec.measure('episode_load', 1, worker=True) if rec else nullcontext():
-                episode_rels = list(
+                episode_rels = refreshed_rows if refreshed_rows is not None else list(
                     M3UEpisodeRelation.objects.filter(
                         m3u_account=series_rel.m3u_account,
                         episode__series=series,

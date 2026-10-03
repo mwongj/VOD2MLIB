@@ -7,7 +7,7 @@ import sqlite3
 import stat
 import threading
 import time
-from contextlib import contextmanager
+from contextlib import contextmanager, closing
 from collections import defaultdict
 from dataclasses import asdict
 from functools import lru_cache
@@ -74,6 +74,9 @@ class Reconciliation:
         self.started_wall, self.started_cpu = time.perf_counter(), time.process_time()
         self.plugin, self.settings, self.logger = plugin, settings, logger
         self.store = InventoryStore(directory)
+        # Resolve the private inventory location once, rather than traversing its
+        # ancestors for every output ownership lookup.
+        self.reader_uri = Path(self.store.db_path).resolve().as_uri() + '?mode=ro'
         self.snapshot = None
         self.queue = Queue(maxsize=BATCH_SIZE)
         self.cache_queue = Queue(maxsize=BATCH_SIZE)
@@ -101,6 +104,7 @@ class Reconciliation:
             "generation_candidates": 0,
             "generation_deduped": 0,
             "series_completed": 0,
+            "provider_imports_skipped": 0,
             "episodes_evaluated": 0,
             "source_presence_requested": 0,
             "source_presence_found": 0,
@@ -668,8 +672,7 @@ class Reconciliation:
         if os.path.islink(path):
             return False
         # Workers use short read-only connections; all writes stay on the parent.
-        uri = Path(self.store.db_path).resolve().as_uri() + "?mode=ro"
-        with sqlite3.connect(uri, uri=True) as reader:
+        with closing(sqlite3.connect(self.reader_uri, uri=True)) as reader:
             row = reader.execute(
                 "SELECT strm_url FROM files WHERE path=?", (os.path.abspath(path),)
             ).fetchone()
@@ -951,8 +954,7 @@ class Reconciliation:
 
     def episode_cache(self, kind):
         # Workers only read SQLite; the action thread commits successful decisions.
-        uri = Path(self.store.db_path).resolve().as_uri() + '?mode=ro'
-        db = sqlite3.connect(uri, uri=True)
+        db = sqlite3.connect(self.reader_uri, uri=True)
         try:
             return dict(db.execute(
                 'SELECT source,signature FROM generation_entries WHERE kind=?', (kind,),

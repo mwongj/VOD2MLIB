@@ -103,7 +103,7 @@ def test_drain_frees_checkpoints_before_inventory_and_never_commits_after_failur
         rec.store.close()
 
 
-def test_frozen_series_catalogue_produces_identical_output_with_three_or_six_workers(library):
+def test_frozen_series_catalogue_produces_identical_output_across_worker_counts(library):
     # Provider/catalogue inputs stay fixed: changing concurrency must not add files.
     for show_id, count_ in [(101, 10), (102, 4), (103, 25)]:
         show = media(show_id)
