@@ -3,12 +3,13 @@
 import json
 import os
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 
 try:
-    from .inventory import LOOKUP_BATCH_SIZE
+    from .inventory import LOOKUP_BATCH_SIZE, remove_strm
     from .metadata_filters import configuration, evaluate_metadata
 except ImportError:
-    from inventory import LOOKUP_BATCH_SIZE
+    from inventory import LOOKUP_BATCH_SIZE, remove_strm
     from metadata_filters import configuration, evaluate_metadata
 
 
@@ -104,7 +105,15 @@ def cleanup(rec, action):
         'WHERE s.path=f.path AND (d.passed IS NULL OR d.passed=1)) '
         'AND f.path>? ORDER BY f.path LIMIT ?')
     dry_run = action == 'preview_cleanup'
-    with rec.measure('filter_cleanup'):
+    def remove_one(row):
+        with rec.measure('cleanup_strm_io', 1, worker=True):
+            was_existing = os.path.lexists(row['path'])
+            try:
+                return remove_strm(row, rec.roots, dry_run), None, was_existing
+            except OSError as error:
+                return None, error, was_existing
+
+    with rec.measure('filter_cleanup'), ThreadPoolExecutor(max_workers=3) as workers:
         last_path = ''
         while True:
             reader = db.execute(sql, (*kinds, last_path, LOOKUP_BATCH_SIZE))
@@ -114,13 +123,14 @@ def cleanup(rec, action):
                 break
             last_path = batch[-1]['path']
             with rec.measure('filter_cleanup_batch', len(batch)), rec.store.forget_batch():
-                for row in batch:
+                for row, (outcome, error, was_existing) in zip(batch, workers.map(remove_one, batch)):
                     rec.report['filter_checked'] += 1
                     db.execute('INSERT OR IGNORE INTO filter_handled VALUES (?)', (row['path'],))
-                    was_existing = os.path.lexists(row['path'])
                     try:
-                        outcome = rec.store.delete(row, rec.roots, include_nfo=True,
-                                                   dry_run=dry_run, stats=rec.report)
+                        if error is not None:
+                            raise error
+                        outcome = rec.store.finish_delete(row, rec.roots, outcome, include_nfo=True,
+                                                          dry_run=dry_run, stats=rec.report)
                         rec.report[outcome] += 1
                         counter = {'candidate': 'filter_candidates', 'deleted': 'filter_deleted',
                                    'preserved': 'filter_preserved', 'missing': 'filter_missing'}[outcome]

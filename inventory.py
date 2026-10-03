@@ -92,6 +92,21 @@ def contained(path, roots):
     return False
 
 
+def remove_strm(row, roots, dry_run=False):
+    """Verify and remove one STRM without touching SQLite or shared NFOs."""
+    path = row['path']
+    if not contained(path, roots):
+        return 'preserved'
+    missing = not os.path.lexists(path)
+    if not missing and (os.path.islink(path) or strm_contents(path) != row['strm_url']):
+        return 'preserved'
+    if dry_run:
+        return 'missing' if missing else 'candidate'
+    if not missing:
+        os.remove(path)
+    return 'missing' if missing else 'deleted'
+
+
 class InventoryStore:
     def __init__(self, directory):
         Path(directory).mkdir(parents=True, exist_ok=True)
@@ -289,18 +304,16 @@ class InventoryStore:
         )
 
     def delete(self, row, roots, include_nfo=False, dry_run=False, stats=None):
-        path = row["path"]
-        if not contained(path, roots):
-            return "preserved"
-        missing = not os.path.lexists(path)
-        if not missing and (
-            os.path.islink(path) or strm_contents(path) != row["strm_url"]
-        ):
-            return "preserved"
-        if dry_run:
-            return "missing" if missing else "candidate"
-        if not missing:
-            os.remove(path)
+        outcome = remove_strm(row, roots, dry_run)
+        return self.finish_delete(row, roots, outcome, include_nfo, dry_run, stats)
+
+    def finish_delete(self, row, roots, outcome, include_nfo=False, dry_run=False, stats=None):
+        """Finalize file-only worker results on the inventory's owning thread."""
+        if outcome not in ('preserved', 'candidate', 'missing', 'deleted'):
+            raise ValueError('Invalid STRM removal result')
+        if dry_run or outcome in ('preserved', 'candidate'):
+            return outcome
+        path = row['path']
         # Retain the record if an NFO deletion fails, so the next run can retry.
         if include_nfo:
             for nfo, digest in json.loads(row["nfos"]).items():
@@ -323,7 +336,7 @@ class InventoryStore:
             self._cleanup_folders[folder] = (roots, stats)
         else:
             self._remove_empty_parents(folder, roots, stats)
-        return "missing" if missing else "deleted"
+        return outcome
 
     def _remove_empty_parents(self, folder, roots, stats):
         folder = Path(folder)

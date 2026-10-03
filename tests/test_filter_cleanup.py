@@ -274,3 +274,41 @@ def test_keyset_inventory_batches_do_not_skip_rows_during_deletion(library):
                 assert store.delete(row, [library.settings['root_folder']]) == 'deleted'
     assert len(set(removed)) == 7 and not list(store.rows())
     store.close()
+
+
+def test_parallel_cleanup_keeps_shared_nfo_when_edited_episode_remains(library):
+    show = media(10, year=2019)
+    library.rows['series'].append(relation(show, 'series'))
+    for n in range(1, 4):
+        library.rows['episodes'].append(relation(media(n, series=show, season_number=1, episode_number=n), 'episode'))
+    library.run('generate_series')
+    root = Path(library.settings['series_root_folder'])
+    paths = sorted(root.rglob('*.strm'))
+    paths[-1].write_text('custom stream')
+    result = library.run('generate_series', series_earliest_year='2020')
+    assert result['reconciliation']['filter_deleted'] == 2
+    assert result['reconciliation']['filter_preserved'] == 1
+    assert paths[-1].read_text() == 'custom stream'
+    assert len(list(root.rglob('tvshow.nfo'))) == 1
+    assert result['reconciliation']['timings']['cleanup_strm_io']['calls'] == 3
+
+
+def test_worker_partial_unlink_failure_is_counted_and_retryable(library, monkeypatch):
+    import inventory
+    library.rows['movies'].append(relation(media(1, year=1914)))
+    library.run()
+    path = next(Path(library.settings['root_folder']).rglob('*.strm'))
+    original = inventory.os.remove
+    def fail_after_unlink(target):
+        original(target)
+        if str(target).endswith('.strm'):
+            raise OSError('unlink interrupted')
+    with monkeypatch.context() as patch:
+        patch.setattr(inventory.os, 'remove', fail_after_unlink)
+        result = library.run(movie_earliest_year='2000')
+    assert result['reconciliation']['filter_deleted'] == 1
+    assert result['reconciliation']['filter_errors'] == 1
+    assert not path.exists() and path.with_suffix('.nfo').exists()
+    result = library.run(movie_earliest_year='2000')
+    assert result['reconciliation']['filter_missing'] == 1
+    assert not path.with_suffix('.nfo').exists()
