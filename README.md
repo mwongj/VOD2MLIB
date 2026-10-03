@@ -294,3 +294,20 @@ Routine generation treats SQLite as authoritative for plugin-managed output. Mov
 Unchanged generation does not stat every tracked STRM or traverse output directories. Only verified cleanup candidates touch the filesystem. Files added, edited or removed externally require **Rebuild / discover inventory**, which preserves ownership/NFO protection and resets generation decisions. Run generation afterward to recreate missing eligible files. Selective cleanup also verifies missing tracked files. Missing entire output roots invalidate decisions automatically. SQLite schema 3 adds generation decisions and upgrades schema 1/2 in place; the first generation establishes the cache.
 
 TV episode output also skips unchanged cached STRMs after episode data is fetched. Provider refreshes remain necessary when Refresh Existing Series/full rescan is used: Dispatcharr fetches episode lists on demand, so an unchanged show entry does not prove the provider has no new episodes. This optimization does not eliminate those provider calls or their latency. Full rescans retain complete M3U presence checks according to cleanup timing; generation-only runs can omit those checks. Telemetry reports lightweight rows checked, unchanged decisions, hydrated movie candidates and incremental projection read time.
+
+
+### Independent metadata filters
+
+Movies and series have separate **Minimum Score**, **Earliest Year**, **Latest Year**, and **Missing Metadata** settings. Blank score/year bounds disable those rules; all new rules start inactive and missing metadata defaults to **Keep unknowns**. Movie years are release years; series years are debut years from Dispatcharr's model `year` field. Scores must be numeric within 0?10, years must be positive integers, and earliest year must not exceed latest year. Invalid settings stop the action before reconciliation or generation.
+
+Enabled rules combine with AND, and score/year boundaries are inclusive. Missing, zero, invalid, nonfinite, negative, and above-10 model scores are unknown. Missing or invalid years are unknown. **Reject unknowns** applies only to enabled rules; it does not discard titles for unused metadata.
+
+Series also support comma-separated **Genre Include** and **Genre Exclude** lists. Match complete names without case sensitivity: `Action & Adventure` stays one name, as does `Sci-Fi & Fantasy`. Any included genre qualifies; any excluded genre rejects, even if another genre qualifies. Only commas separate names, both in configuration and model metadata. Empty model genres follow the series missing-metadata policy when a genre rule is enabled. Movie genre filtering is unavailable.
+
+Filters read Dispatcharr model metadata directly, without NFOs, Emby enrichment, title-derived years, or category-derived genres. Provider age classifications such as `PG-13` are unknown numeric scores. Metadata completeness varies by provider; **Keep unknowns** can retain many titles.
+
+**Catalogue snapshot** reports separate movie/series eligible and passing title counts, rejected counts for score/year/genre, and passing titles retained with unknown metadata. Counts use unique titles after native account/category eligibility and precede existing-library checks. A title failing multiple rules counts against each, so rejection counts can overlap.
+
+Filtering happens before deduplication, batch selection, and episode fetching. Rejected titles create no output and are not refreshed. Existing files remain in place: metadata filters never establish upstream removal, and source-presence cleanup continues to check the complete unfiltered Dispatcharr catalogue. Existing Emby/M3U cleanup policies still apply independently. Incremental decisions include filter settings and relevant metadata, so later changes are reevaluated.
+
+Save settings and run **Catalogue snapshot** to inspect eligibility. Re-click **Apply / Update** after changing filter settings so the schedule captures the new values.

@@ -904,9 +904,10 @@ class Reconciliation:
         finally:
             db.close()
 
-    def episode_decision(self, rel, path):
+    def episode_decision(self, rel, path, series):
         ep = rel.episode
         return str(ep.uuid), signature(self.settings, [
             rel.m3u_account_id, rel.stream_id, str(ep.uuid), ep.name,
             ep.season_number, ep.episode_number, path,
+            series.rating, series.year, series.genre,
         ])

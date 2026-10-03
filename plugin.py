@@ -1,7 +1,7 @@
 """
 VOD to Media Library — Dispatcharr VOD .strm Generator Plugin
 (slug: vod2mlib)
-v1.19.0-rc.13 — incremental generation and targeted M3U source verification.
+v1.19.0-rc.14 — incremental generation and targeted M3U source verification.
 
 MIT License
 Copyright (c) 2025-2026 shedunraid (original author)
@@ -20,11 +20,13 @@ try:
     from .reconciliation import Reconciliation
     from . import action_runner
     from .media_library import create_adapter
+    from .metadata_filters import FIELDS as FILTER_FIELDS, configuration, passing_relations, catalogue_counts
 except ImportError:
     from inventory import action_lock, state_directory, file_hash, contained, BATCH_SIZE
     from reconciliation import Reconciliation
     import action_runner
     from media_library import create_adapter
+    from metadata_filters import FIELDS as FILTER_FIELDS, configuration, passing_relations, catalogue_counts
 
 
 class VODType(Enum):
@@ -36,7 +38,7 @@ class Plugin:
     """Generate .strm files for VOD movies from Dispatcharr."""
 
     name = "VOD to Media Library"
-    version = "1.19.0-rc.13"
+    version = "1.19.0-rc.14"
     help_url = "https://github.com/R3XCHRIS/VOD2MLIB#readme"
     description = (
         "Convert Dispatcharr VODs into media-server-friendly .strm files, with "
@@ -548,6 +550,8 @@ class Plugin:
                              'scope includes NFOs and their generated hashes match. Unverified and edited files '
                              'are preserved.'}}]
 
+    fields.extend(FILTER_FIELDS)
+
     actions.extend([{'id': 'action_status', 'label': '[ACTION] Status',
                      'description': 'Show the running background action or its final result.'},
                     {'id': 'stop_action', 'label': '[ACTION] Stop running action',
@@ -559,6 +563,10 @@ class Plugin:
             return action_runner.status()
         if action == "stop_action":
             return action_runner.stop()
+        try:
+            configuration(settings)
+        except ValueError as error:
+            return {"status": "error", "message": str(error)}
         if action in {"generate_movies", "generate_series", "rescan_all", "cleanup_movies", "cleanup_series", "preview_cleanup", "selective_cleanup", "list_media_libraries", "rebuild_inventory"}:
             return action_runner.start(action, params, settings)
         return self._run_action(action, params, context)
@@ -576,6 +584,7 @@ class Plugin:
             return self._run_action(action, params, context)
         reconciliation = None
         try:
+            configuration(settings)
             with action_lock(state_directory()):
                 reconciliation = Reconciliation(self, settings, logger, state_directory())
                 self._reconciliation = reconciliation
@@ -690,6 +699,10 @@ class Plugin:
 
     def _scan_all_vods(self, settings: Dict[str, Any], logger):
         """Scan and show total movies and series available."""
+        try:
+            filter_rules = configuration(settings)
+        except ValueError as error:
+            return {"status": "error", "message": str(error)}
         logger.info("Scanning VODs in Dispatcharr...")
         logger.info("")
 
@@ -709,6 +722,12 @@ class Plugin:
             eligible_series = self._eligible_vod_relations(
                 M3USeriesRelation.objects.all(), VODType.SERIES,
             )
+            filter_counts = {
+                'movies': catalogue_counts(eligible_movies, 'movie', filter_rules['movie']),
+                'series': catalogue_counts(eligible_series, 'series', filter_rules['series']),
+            }
+            for kind, counts in filter_counts.items():
+                logger.info("Metadata filters %s (before library checks): %s", kind, counts)
             active_movie = eligible_movies.values("movie_id").distinct().count()
             active_series = eligible_series.values("series_id").distinct().count()
             total_movie = Movie.objects.count()
@@ -750,7 +769,7 @@ class Plugin:
             logger.info("Use 'Generate Movie .strm Files' for movies")
             logger.info("Use 'Generate Series .strm Files' for series")
 
-            message = f"Found {active_movie} movies and {active_series} series"
+            message = f"Found {active_movie} movies and {active_series} series; metadata filters pass {filter_counts['movies']['passing']} movies and {filter_counts['series']['passing']} series"
             if orphan_movie or orphan_series:
                 message += f" ({orphan_movie + orphan_series} orphaned — no active provider with an enabled category)"
 
@@ -759,6 +778,7 @@ class Plugin:
                 "message": message,
                 "movies": active_movie,
                 "series": active_series,
+                "metadata_filters": filter_counts,
                 "movies_orphaned": orphan_movie,
                 "series_orphaned": orphan_series,
             }
@@ -901,6 +921,10 @@ class Plugin:
         user-visible setting). When True, existing .strm files are rewritten
         with the current Dispatcharr URL; .nfo files are still preserved.
         """
+        try:
+            filter_rules = configuration(settings)
+        except ValueError as error:
+            return {"status": "error", "message": str(error)}
         root_folder = settings.get("root_folder", "/VODS/Movies")
         dispatcharr_url = (settings.get("dispatcharr_url") or "").rstrip("/")
         batch_size = settings.get("batch_size") or "250"
@@ -980,7 +1004,7 @@ class Plugin:
         logger.info("-" * 60)
 
         rec = getattr(self, '_reconciliation', None)
-        relations = rec.movies(query) if rec else query.iterator()
+        relations = rec.movies(query) if rec else passing_relations(query, 'movie', filter_rules['movie'])
         for relation in relations:
             scanned += 1
             movie = relation.movie
@@ -1169,6 +1193,10 @@ class Plugin:
 
     def _generate_series(self, settings: Dict[str, Any], logger):
         """Generate series .strm files with episodes using parallel processing."""
+        try:
+            filter_rules = configuration(settings)
+        except ValueError as error:
+            return {"status": "error", "message": str(error)}
         series_root = settings.get("series_root_folder", "/VODS/Series")
         dispatcharr_url = (settings.get("dispatcharr_url") or "").rstrip("/")
         batch_size = settings.get("series_batch_size") or "10"
@@ -1244,7 +1272,7 @@ class Plugin:
             nonlocal deduped
             submitted = 0
             seen = set() if dedupe_across_cats else None
-            for rel in query.iterator(chunk_size=BATCH_SIZE):
+            for rel in passing_relations(query, 'series', filter_rules['series']):
                 if self._owned(rel.series, "series"):
                     continue
                 if seen is not None:
@@ -1484,7 +1512,7 @@ class Plugin:
                 filename = self._sanitize_filename(filename)
 
                 strm_path = os.path.join(season_folder, f"{filename}.strm")
-                decision = rec.episode_decision(episode_rel, strm_path) if rec else None
+                decision = rec.episode_decision(episode_rel, strm_path, series) if rec else None
                 if decision and episode_cache.get(decision[0]) == decision[1]:
                     unchanged_episodes += 1
                     with rec.counter_lock:
