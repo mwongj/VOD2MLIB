@@ -99,6 +99,16 @@ def configuration(settings):
     return rules
 
 
+SECTION = dict(
+    id='_section_metadata_filters',
+    label='[METADATA FILTERS]',
+    type='info',
+    description='Filter movies and series independently by score and year, and series by genre, '
+                'using Dispatcharr metadata. Blank rules are disabled; unknown metadata is kept '
+                'by default. Existing files remain in place. Re-click Apply / Update after changing '
+                'settings to update the schedule.',
+)
+
 FIELDS = []
 for _kind in ('movie', 'series'):
     for _suffix, _label, _help in (

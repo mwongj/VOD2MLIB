@@ -439,6 +439,12 @@
       "help_text": "Stops a generation, library check or cleanup and all its workers after this deadline. Background actions continue after the browser closes. Use Action status for results or Stop running action to cancel sooner. Completed file changes remain; retry resumes normal processing."
     },
     {
+      "id": "_section_metadata_filters",
+      "label": "[METADATA FILTERS]",
+      "type": "info",
+      "description": "Filter movies and series independently by score and year, and series by genre, using Dispatcharr metadata. Blank rules are disabled; unknown metadata is kept by default. Existing files remain in place. Re-click Apply / Update after changing settings to update the schedule."
+    },
+    {
       "id": "movie_minimum_score",
       "label": "Minimum Score (Movie)",
       "type": "string",

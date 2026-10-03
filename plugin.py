@@ -20,13 +20,13 @@ try:
     from .reconciliation import Reconciliation
     from . import action_runner
     from .media_library import create_adapter
-    from .metadata_filters import FIELDS as FILTER_FIELDS, configuration, passing_relations, catalogue_counts
+    from .metadata_filters import FIELDS as FILTER_FIELDS, SECTION as FILTER_SECTION, configuration, passing_relations, catalogue_counts
 except ImportError:
     from inventory import action_lock, state_directory, file_hash, contained, BATCH_SIZE
     from reconciliation import Reconciliation
     import action_runner
     from media_library import create_adapter
-    from metadata_filters import FIELDS as FILTER_FIELDS, configuration, passing_relations, catalogue_counts
+    from metadata_filters import FIELDS as FILTER_FIELDS, SECTION as FILTER_SECTION, configuration, passing_relations, catalogue_counts
 
 
 class VODType(Enum):
@@ -550,7 +550,7 @@ class Plugin:
                              'scope includes NFOs and their generated hashes match. Unverified and edited files '
                              'are preserved.'}}]
 
-    fields.extend(FILTER_FIELDS)
+    fields.extend([FILTER_SECTION, *FILTER_FIELDS])
 
     actions.extend([{'id': 'action_status', 'label': '[ACTION] Status',
                      'description': 'Show the running background action or its final result.'},
