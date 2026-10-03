@@ -1,7 +1,7 @@
 """
 VOD to Media Library — Dispatcharr VOD .strm Generator Plugin
 (slug: vod2mlib)
-v1.19.0-rc.14 — incremental generation and targeted M3U source verification.
+v1.20.0-rc.1 — independent movie and series metadata filters.
 
 MIT License
 Copyright (c) 2025-2026 shedunraid (original author)
@@ -38,7 +38,7 @@ class Plugin:
     """Generate .strm files for VOD movies from Dispatcharr."""
 
     name = "VOD to Media Library"
-    version = "1.19.0-rc.14"
+    version = "1.20.0-rc.1"
     help_url = "https://github.com/R3XCHRIS/VOD2MLIB#readme"
     description = (
         "Convert Dispatcharr VODs into media-server-friendly .strm files, with "
