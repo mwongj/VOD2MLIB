@@ -103,6 +103,29 @@ def test_drain_frees_checkpoints_before_inventory_and_never_commits_after_failur
         rec.store.close()
 
 
+def test_frozen_series_catalogue_produces_identical_output_with_three_or_six_workers(library):
+    # Provider/catalogue inputs stay fixed: changing concurrency must not add files.
+    for show_id, count_ in [(101, 10), (102, 4), (103, 25)]:
+        show = media(show_id)
+        library.rows['series'].append(relation(show, 'series'))
+        for n in range(1, count_ + 1):
+            ep = media(show_id * 100 + n, series=show, season_number=1, episode_number=n)
+            rel = relation(ep, 'episode')
+            library.rows['episodes'].append(rel)
+            if n == 1:
+                library.rows['episodes'].append(relation(ep, 'episode', stream='duplicate'))
+    manifests = []
+    for workers in ('3', '6'):
+        root = library.tmp / ('series-workers-' + workers)
+        result = library.run('generate_series', series_root_folder=str(root),
+                             series_workers=workers, refresh_existing=True)
+        assert result['errors'] == 0 and result['episodes_created'] == 39
+        assert result['nfo_created'] == 42
+        manifests.append({str(p.relative_to(root)): p.read_bytes()
+                          for p in root.rglob('*') if p.is_file()})
+    assert manifests[0] == manifests[1]
+
+
 def test_series_generation_reports_work_and_avoids_repeated_directory_setup(library, monkeypatch):
     show = media(10)
     library.rows['series'].append(relation(show, 'series'))
