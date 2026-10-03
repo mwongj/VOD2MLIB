@@ -81,7 +81,7 @@ def test_series_reject_before_batch_and_episode_fetch(library):
         library.rows['episodes'].append(relation(media(id+1, series=show, season_number=1, episode_number=1), 'episode'))
     result = library.run('generate_series', series_genre_include='Action & Adventure', series_batch_size='1', refresh_existing=True)
     assert result['episodes_created'] == 1
-    assert len(library.calls) == 1
+    assert len(library.calls) == 0
     assert not list(Path(library.settings['series_root_folder']).glob('Title 10*'))
 
 
@@ -212,7 +212,7 @@ def test_title_filters_precede_series_fetch_and_reject_before_cleanup(library):
         library.rows['series'].append(relation(show, 'series'))
         library.rows['episodes'].append(relation(media(id+1, series=show, season_number=1, episode_number=1), 'episode'))
     result = library.run('generate_series', series_title_exclude=r'^AR\s*-', series_batch_size='1', refresh_existing=True)
-    assert result['episodes_created'] == 1 and len(library.calls) == 1
+    assert result['episodes_created'] == 1 and len(library.calls) == 0
     assert library.run('generate_series')['episodes_created'] == 1
     paths = list(Path(library.settings['series_root_folder']).rglob('*.strm'))
     result = library.run('rescan_all', series_title_exclude='.*', m3u_cleanup_enabled=True)

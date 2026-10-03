@@ -146,7 +146,7 @@ def test_series_generation_reports_work_and_avoids_repeated_directory_setup(libr
     report = result['reconciliation']
     assert report['series_completed'] == 1 and report['episodes_evaluated'] == 4
     timings = report['timings']
-    assert timings['provider_refresh']['calls'] == 1
+    assert timings['episode_query']['calls'] == 1
     assert timings['series_files']['items'] == 4
     assert timings['strm_write']['items'] == 4
     assert timings['episode_nfo']['items'] == 4
@@ -154,7 +154,7 @@ def test_series_generation_reports_work_and_avoids_repeated_directory_setup(libr
     assert timings['inventory_checkpoint']['items'] == 4
     assert timings['series_files']['cpu_clock'] == 'thread'
     assert '1 completed' in live[-1] and '4 episodes evaluated' in live[-1]
-    # Cached episodes still refresh their provider, but create no output or directories.
+    # Cached database episodes create no output or directories and never fetch providers.
     directories.clear()
     result = library.run('generate_series', refresh_existing=True)
     assert result['episodes_created'] == 0 and not directories
@@ -180,7 +180,7 @@ def test_worker_timing_uses_thread_cpu_and_live_snapshots_are_independent(librar
         rec.store.close()
 
 
-def test_provider_sql_wrapper_records_counts_without_query_data(library, monkeypatch):
+def test_episode_sql_wrapper_records_counts_without_query_data(library, monkeypatch):
     from contextlib import contextmanager
     rec = Reconciliation(library.p, library.settings, LOG, library.tmp / 'sql-timing')
     wrappers = []
@@ -194,15 +194,15 @@ def test_provider_sql_wrapper_records_counts_without_query_data(library, monkeyp
     monkeypatch.setitem(sys.modules, 'django.conf', NS(settings=NS(configured=True)))
     monkeypatch.setitem(sys.modules, 'django.db', NS(connection=NS(execute_wrapper=execute_wrapper)))
     try:
-        with rec.provider_refresh():
+        with rec.episode_query():
             assert wrappers[0](lambda *args: 'result', 'private SQL', ['secret'], False, {}) == 'result'
         assert not wrappers
-        assert rec.report['timings']['provider_sql']['calls'] == 1
+        assert rec.report['timings']['episode_sql']['calls'] == 1
         assert 'secret' not in json.dumps(rec.telemetry())
         with pytest.raises(ValueError):
-            with rec.provider_refresh():
+            with rec.episode_query():
                 raise ValueError('failed')
-        assert not wrappers and rec.report['timings']['provider_refresh']['calls'] == 2
+        assert not wrappers and rec.report['timings']['episode_query']['calls'] == 2
     finally:
         rec.store.close()
 
@@ -528,7 +528,7 @@ def test_m3u_manual_timing(library):
     )
 
 
-def test_failed_m3u_refresh_preserves_files(library, monkeypatch):
+def test_failed_database_source_census_preserves_files(library, monkeypatch):
     show = media(10)
     library.rows["series"].append(relation(show, "series"))
     library.rows["episodes"].append(
@@ -538,7 +538,7 @@ def test_failed_m3u_refresh_preserves_files(library, monkeypatch):
     library.rows["episodes"].clear()
     monkeypatch.setattr(
         Reconciliation,
-        "refresh_complete",
+        "tracked_source_census",
         lambda *a: (_ for _ in ()).throw(RuntimeError("Incomplete")),
     )
     result = library.run("selective_cleanup", m3u_cleanup_enabled=True)
@@ -785,7 +785,7 @@ def test_incremental_upgrade_seeds_verified_inventory_without_file_reads(library
     assert result['unchanged_candidates'] == 1
 
 
-def test_incremental_episode_outputs_retain_provider_refresh_and_skip_unchanged(library, monkeypatch):
+def test_incremental_episode_outputs_use_database_and_skip_unchanged(library, monkeypatch):
     show = media(10)
     library.rows['series'].append(relation(show, 'series'))
     library.rows['episodes'].append(relation(media(1, series=show, season_number=1, episode_number=1), 'episode'))
@@ -798,7 +798,7 @@ def test_incremental_episode_outputs_retain_provider_refresh_and_skip_unchanged(
     with monkeypatch.context() as m:
         m.setattr(os.path, 'isfile', guard)
         result = library.run('generate_series', refresh_existing=True)
-    assert len(library.calls) == before + 1
+    assert len(library.calls) == before
     assert result['episodes_created'] == 0
     assert result['reconciliation']['generation_unchanged'] == 1
     library.rows['episodes'].append(relation(media(2, series=show, season_number=1, episode_number=2), 'episode'))
@@ -1098,10 +1098,7 @@ def test_m3u_episode_removal_and_reappearance(library, monkeypatch):
     library.rows["episodes"].extend([ep1, ep2])
     library.run("generate_series")
 
-    def refresh_complete(*args):
-        library.rows["episodes"][:] = [ep1]
-
-    monkeypatch.setattr(Reconciliation, "refresh_complete", refresh_complete)
+    library.rows["episodes"][:] = [ep1]
     result = library.run("selective_cleanup", m3u_cleanup_enabled=True)
     assert result["reconciliation"]["deleted"] == 1
     library.rows["episodes"].append(ep2)
@@ -1109,27 +1106,9 @@ def test_m3u_episode_removal_and_reappearance(library, monkeypatch):
     assert result["episodes_created"] == 1
 
 
-def test_m3u_refresh_only_shows_with_generated_output(library, monkeypatch):
-    show = media(10)
-    other = media(20)
-    library.rows["series"].append(relation(show, "series"))
-    library.rows["episodes"].append(
-        relation(media(1, series=show, season_number=1, episode_number=1), "episode")
-    )
-    library.run("generate_series")
-    library.rows["series"].append(relation(other, "series"))
-    refreshed = []
-    monkeypatch.setattr(
-        Reconciliation,
-        "refresh_complete",
-        lambda self, rel, _: refreshed.append(rel.series.id),
-    )
-    result = library.run("selective_cleanup", m3u_cleanup_enabled=True)
-    assert result["status"] == "ok"
-    assert refreshed == [10]
 
 
-def test_m3u_reuses_complete_census_when_no_provider_refresh(library, monkeypatch):
+def test_m3u_reuses_complete_census_when_no_episode_query(library, monkeypatch):
     library.rows["movies"].append(relation(media(1)))
     library.run()
     library.run('preview_cleanup')  # Establish the generated root marker.
@@ -1175,85 +1154,6 @@ def test_bulk_listing_matches_separate_strm_and_file_versions(monkeypatch):
     assert snapshot.owns(Identity("movie", "Movie", tmdb="1"))
 
 
-@pytest.mark.parametrize(
-    "response,completion,error",
-    [
-        ({"episodes": {"0": []}}, True, None),
-        ({"episodes": {"1": [{"id": "1", "episode_num": 1}]}}, True, None),
-        (
-            {"episodes": {"1": [{"id": "1", "episode_num": 1}]}},
-            False,
-            "did not complete",
-        ),
-        ({}, True, "Incomplete"),
-        ({"episodes": {"1": [{"id": "1", "episode_num": "invalid"}]}}, True, None),
-    ],
-)
-def test_refresh_completion_verification(monkeypatch, response, completion, error):
-    calls = []
-
-    class Client:
-        def __init__(self, *args):
-            pass
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *args):
-            pass
-
-        def get_series_info(self, id):
-            return response
-
-    monkeypatch.setitem(sys.modules, "core.xtream_codes", NS(Client=Client))
-
-    class Values:
-        def iterator(self, **kwargs):
-            return iter(
-                [
-                    str(e["id"])
-                    for eps in response.get("episodes", {}).values()
-                    for e in eps
-                ]
-            )
-
-    class Episodes:
-        def filter(self, **kwargs):
-            return self
-
-        def values_list(self, *args, **kwargs):
-            return Values()
-
-    monkeypatch.setitem(
-        sys.modules, "apps.vod.models", NS(M3UEpisodeRelation=NS(objects=Episodes()))
-    )
-    rel = NS(
-        m3u_account=NS(
-            server_url="http://provider",
-            username="u",
-            password="p",
-            get_user_agent_string=lambda: "agent",
-        ),
-        external_series_id="1",
-        series=NS(),
-        last_episode_refresh=1,
-        refresh_from_db=lambda: None,
-    )
-
-    def refresher(**kwargs):
-        calls.append(kwargs)
-        if completion:
-            rel.last_episode_refresh = 2
-
-    invalid_number = (
-        response.get("episodes", {}).get("1", [{}])[0].get("episode_num") == "invalid"
-    )
-    if error or invalid_number:
-        with pytest.raises(ValueError, match=error or "invalid literal"):
-            Reconciliation.refresh_complete(rel, refresher)
-    else:
-        Reconciliation.refresh_complete(rel, refresher)
-        assert calls[0]["episodes_data"]  # complete empty response must not refetch
 
 
 def test_unknown_schema_is_rejected(tmp_path):
@@ -1368,7 +1268,7 @@ def test_whole_show_mode_never_fetches_owned_provider_episodes(library, monkeypa
     def forbidden(*args):
         raise AssertionError("Owned shows must be excluded before fetching episodes")
 
-    monkeypatch.setattr(Reconciliation, "refresh_complete", forbidden)
+    monkeypatch.setitem(sys.modules, "core.xtream_codes", NS(Client=forbidden))
     result = library.run(
         "rescan_all", media_library_enabled=True, m3u_cleanup_enabled=True
     )
@@ -1566,13 +1466,6 @@ def test_discovery_skips_symlink_files_and_directories(tmp_path):
     assert list(Reconciliation.generated_paths(tmp_path / "missing")) == []
 
 
-def test_no_tracked_episodes_skips_m3u_show_scan(library, monkeypatch):
-    rec = Reconciliation(library.p, library.settings, LOG, library.tmp / "state")
-    monkeypatch.setattr(Query, "iterator", lambda *_args, **_kw: pytest.fail("Unneeded scan"))
-    try:
-        assert rec.refresh_tracked_series() is False
-    finally:
-        rec.store.close()
 
 
 
@@ -1823,16 +1716,15 @@ def test_failed_lean_query_never_establishes_m3u_absence(library, monkeypatch):
     assert result["reconciliation"]["warnings"] and strm.exists()
 
 
-def test_after_episode_refresh_census_uses_sources_only(library, monkeypatch):
+def test_cleanup_uses_database_source_census_once(library, monkeypatch):
     show = media(10)
     library.rows["series"].append(relation(show, "series"))
     library.rows["episodes"].append(
         relation(media(1, series=show, season_number=1, episode_number=1), "episode")
     )
     library.run("generate_series")
-    monkeypatch.setattr(Reconciliation, "refresh_complete", lambda *_: None)
     result = library.run("preview_cleanup", m3u_cleanup_enabled=True)
-    assert result["reconciliation"]["catalogue_modes"] == ["metadata", "sources", "sources"]
+    assert result["reconciliation"]["catalogue_modes"] == ["metadata", "sources"]
 
 
 def test_forced_discovery_invalidates_marker_when_root_stat_fails(library, monkeypatch):

@@ -1,6 +1,6 @@
 {
   "name": "VOD to Media Library",
-  "version": "1.20.0-rc.8",
+  "version": "1.20.0-rc.9",
   "description": "VOD → media library bridge. Generates .strm + NFO files from Dispatcharr's VOD catalogue, with optional cron-driven auto-rescan that picks up newly-added episodes.",
   "author": "R3XCHRIS",
   "license": "MIT",
@@ -223,7 +223,7 @@
           "label": "6"
         }
       ],
-      "help_text": "Concurrent series refresh and generation tasks. Default 3; increase after measuring provider and storage performance. Movies continue using 3 workers."
+      "help_text": "Concurrent series generation tasks using Dispatcharr database metadata. Default 3; increase after measuring database and storage performance. Movies continue using 3 workers."
     },
     {
       "id": "generate_series_nfo",
@@ -237,7 +237,7 @@
       "label": "Refresh Existing Series (rescan-friendly)",
       "type": "boolean",
       "default": false,
-      "help_text": "Re-evaluate series that already have folders, picking up new episodes added upstream AND rewriting existing episode .strm files so they pick up the current Dispatcharr URL. .nfo files (including tvshow.nfo) are only written when missing, so your edits are preserved. Off = fast manual iteration (skip done series); On = scan everything for new content and refresh existing URLs. Turn ON before clicking Apply Schedule for cron rescans of target 'generate_series'. Note: 'rescan_all' forces this ON regardless."
+      "help_text": "Re-evaluate existing series using only metadata and episodes already stored in Dispatcharr. Include newly stored episodes and refresh changed managed STRM/NFO output while preserving edited files. No provider requests or native metadata updates occur. Off skips already-generated series; On rechecks them. Full rescan forces this On. Refresh or fetch episode data in Dispatcharr before generating if its database is incomplete or stale."
     },
     {
       "id": "nest_series_by_category",

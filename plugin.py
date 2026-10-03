@@ -1,7 +1,7 @@
 """
 VOD to Media Library — Dispatcharr VOD .strm Generator Plugin
 (slug: vod2mlib)
-v1.20.0-rc.8 — independent movie and series metadata filters.
+v1.20.0-rc.9 — independent movie and series metadata filters.
 
 MIT License
 Copyright (c) 2025-2026 shedunraid (original author)
@@ -21,14 +21,13 @@ from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 try:
     from .inventory import action_lock, state_directory, file_hash, contained, BATCH_SIZE
     from .reconciliation import Reconciliation
-    from . import action_runner, series_refresh
+    from . import action_runner
     from .media_library import create_adapter
     from .metadata_filters import FIELDS as FILTER_FIELDS, SECTION as FILTER_SECTION, configuration, passing_relations, catalogue_counts
 except ImportError:
     from inventory import action_lock, state_directory, file_hash, contained, BATCH_SIZE
     from reconciliation import Reconciliation
     import action_runner
-    import series_refresh
     from media_library import create_adapter
     from metadata_filters import FIELDS as FILTER_FIELDS, SECTION as FILTER_SECTION, configuration, passing_relations, catalogue_counts
 
@@ -42,7 +41,7 @@ class Plugin:
     """Generate .strm files for VOD movies from Dispatcharr."""
 
     name = "VOD to Media Library"
-    version = "1.20.0-rc.8"
+    version = "1.20.0-rc.9"
     help_url = "https://github.com/R3XCHRIS/VOD2MLIB#readme"
     description = (
         "Convert Dispatcharr VODs into media-server-friendly .strm files, with "
@@ -294,22 +293,13 @@ class Plugin:
                    "result. For a big catalogue don't use 'All' here: set the cron to 'Full rescan' and click "
                    '[SCHEDULE] Apply / Update. Scheduled runs execute on the Celery worker with no HTTP '
                    'timeout.'},
-     {'id': 'series_workers', 'label': 'Parallel Series Workers', 'type': 'select', 'default': '3', 'options': [{'value': '1', 'label': '1'}, {'value': '2', 'label': '2'}, {'value': '3', 'label': '3'}, {'value': '4', 'label': '4'}, {'value': '5', 'label': '5'}, {'value': '6', 'label': '6'}], 'help_text': 'Concurrent series refresh and generation tasks. Default 3; increase after measuring provider and storage performance. Movies continue using 3 workers.'},
+     {'id': 'series_workers', 'label': 'Parallel Series Workers', 'type': 'select', 'default': '3', 'options': [{'value': '1', 'label': '1'}, {'value': '2', 'label': '2'}, {'value': '3', 'label': '3'}, {'value': '4', 'label': '4'}, {'value': '5', 'label': '5'}, {'value': '6', 'label': '6'}], 'help_text': 'Concurrent series generation tasks using Dispatcharr database metadata. Default 3; increase after measuring database and storage performance. Movies continue using 3 workers.'},
      {'id': 'generate_series_nfo',
       'label': 'Generate Series NFO Files',
       'type': 'boolean',
       'default': True,
       'help_text': 'Create tvshow.nfo and per-episode .nfo metadata files.'},
-     {'id': 'refresh_existing',
-      'label': 'Refresh Existing Series (rescan-friendly)',
-      'type': 'boolean',
-      'default': False,
-      'help_text': 'Re-evaluate series that already have folders, picking up new episodes added upstream AND '
-                   'rewriting existing episode .strm files so they pick up the current Dispatcharr URL. .nfo '
-                   'files (including tvshow.nfo) are only written when missing, so your edits are preserved. Off '
-                   '= fast manual iteration (skip done series); On = scan everything for new content and refresh '
-                   'existing URLs. Turn ON before clicking Apply Schedule for cron rescans of target '
-                   "'generate_series'. Note: 'rescan_all' forces this ON regardless."},
+     {'id': 'refresh_existing', 'label': 'Refresh Existing Series (rescan-friendly)', 'type': 'boolean', 'default': False, 'help_text': 'Re-evaluate existing series using only metadata and episodes already stored in Dispatcharr. Include newly stored episodes and refresh changed managed STRM/NFO output while preserving edited files. No provider requests or native metadata updates occur. Off skips already-generated series; On rechecks them. Full rescan forces this On. Refresh or fetch episode data in Dispatcharr before generating if its database is incomplete or stale.'},
      {'id': 'nest_series_by_category',
       'label': 'Nest Series by Category',
       'type': 'boolean',
@@ -1425,14 +1415,12 @@ class Plugin:
 
         With refresh_existing=False, callers should pre-filter already-done
         series for performance. With refresh_existing=True, every series is
-        re-evaluated and the M3U source is re-fetched so newly-aired episodes
-        are picked up.
+        re-evaluated using the episodes and metadata already stored in Dispatcharr.
 
         When nest_by_cat=True the series folder is wrapped in a subfolder
         named by the M3U category (raw, sanitised) or 'Unassigned'.
         """
         from apps.vod.models import M3UEpisodeRelation
-        from apps.vod.tasks import refresh_series_episodes
 
         rec = getattr(self, '_reconciliation', None)
         series = series_rel.series
@@ -1444,21 +1432,12 @@ class Plugin:
         )
 
         try:
-            custom_props = series_rel.custom_properties or {}
-            refreshed_rows = None
-            should_refetch = refresh_existing or not custom_props.get('episodes_fetched', False)
-            if should_refetch:
-                try:
-                    with rec.provider_refresh() if rec else nullcontext():
-                        refreshed_rows = series_refresh.refresh(series_rel, refresh_series_episodes, rec)
-                except Exception as fetch_err:
-                    logger.warning("refresh_series_episodes failed for %s: %s", series_name, fetch_err)
-
             # `id` is a deterministic tiebreaker: without it the winner among
             # duplicate relations for one episode varies run to run, so the
             # same .strm would flip between provider URLs on every rescan.
-            with rec.measure('episode_load', 1, worker=True) if rec else nullcontext():
-                episode_rels = refreshed_rows if refreshed_rows is not None else list(
+            with (rec.measure('episode_load', 1, worker=True) if rec else nullcontext()), \
+                    (rec.episode_query() if rec else nullcontext()):
+                episode_rels = list(
                     M3UEpisodeRelation.objects.filter(
                         m3u_account=series_rel.m3u_account,
                         episode__series=series,
@@ -2218,7 +2197,7 @@ class Plugin:
         rescans (and manual Rescan All clicks) reliably pick up new content AND
         rewrite existing .strm files so URL changes propagate. Movies use an
         internal kwarg on _generate_movies; series uses the user-visible
-        refresh_existing setting (which also enables new-episode discovery).
+        refresh_existing setting (which rechecks episodes already stored in Dispatcharr).
         Existing .nfo files are preserved either way.
         """
         logger.info("Combined rescan: scan + movies + series (refresh URLs forced ON)")

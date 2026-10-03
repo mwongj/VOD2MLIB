@@ -106,7 +106,6 @@ class Reconciliation:
             "generation_candidates": 0,
             "generation_deduped": 0,
             "series_completed": 0,
-            "provider_imports_skipped": 0,
             "filter_checked": 0,
             "filter_candidates": 0,
             "filter_deleted": 0,
@@ -159,7 +158,7 @@ class Reconciliation:
             }
 
     @contextmanager
-    def provider_refresh(self):
+    def episode_query(self):
         # Django wrappers are connection/thread-local. No SQL or parameters are logged.
         from contextlib import nullcontext
         wrapper = nullcontext()
@@ -168,12 +167,12 @@ class Reconciliation:
             if settings.configured:
                 from django.db import connection
                 def execute(execute, sql, params, many, context):
-                    with self.measure('provider_sql', 1, worker=True):
+                    with self.measure('episode_sql', 1, worker=True):
                         return execute(sql, params, many, context)
                 wrapper = connection.execute_wrapper(execute)
         except ImportError:
             pass
-        with self.measure('provider_refresh', 1, worker=True), wrapper:
+        with self.measure('episode_query', 1, worker=True), wrapper:
             yield
 
     def finish(self):
@@ -289,7 +288,7 @@ class Reconciliation:
             or action == "rescan_all"
             and self.settings.get("m3u_cleanup_timing", "rescan") == "rescan"
         )
-        # Refresh failures must never establish episode absence.
+        # Incomplete database lookups must never establish episode absence.
         try:
             roots = self.discovery_roots()
             if roots:
@@ -298,20 +297,12 @@ class Reconciliation:
             with self.measure("legacy_adoption"):
                 self.adopt(roots=roots)
             cleanup_filters(self, action)
-            refreshed = False
             if m3u:
-                # Include sources adopted during initial discovery, and use the
-                # same exact validation/presence semantics on every M3U check.
+                # Presence is established only by the complete, unfiltered database
+                # census. Never fetch provider data or change native metadata here.
                 for table in ('live', 'live_series'):
                     self.store.db.execute(f'DELETE FROM {table}')
                 with self.measure('catalogue'):
-                    self.census(metadata=False)
-                with self.measure("m3u_tracked_show_check"):
-                    refreshed = self.refresh_tracked_series()
-            if refreshed:
-                for table in ("live", "live_series", "catalogue"):
-                    self.store.db.execute(f"DELETE FROM {table}")
-                with self.measure("catalogue"):
                     self.census(metadata=False)
             self.m3u_complete = m3u
         except FilterCleanupError:
@@ -555,125 +546,6 @@ class Reconciliation:
             self.census_count += len(batch)
             if self.census_count // 10000 > previous // 10000:
                 self.progress(f"Checking Dispatcharr sources: {self.census_count:,} rows processed")
-
-    def refresh_tracked_series(self):
-        if not self.store.db.execute(
-            "SELECT 1 FROM files WHERE kind='series' LIMIT 1"
-        ).fetchone():
-            self.progress("No tracked shows require M3U episode refresh")
-            return False
-        from apps.vod.models import M3USeriesRelation
-        from apps.vod.tasks import refresh_series_episodes
-
-        self.progress("Checking M3U removals and refreshing tracked shows")
-        refreshed = False
-        for rel in (
-            M3USeriesRelation.objects.select_related("series")
-            .only(
-                "m3u_account_id",
-                "external_series_id",
-                "last_episode_refresh",
-                "series__name",
-                "series__year",
-                "series__tmdb_id",
-                "series__imdb_id",
-            )
-            .all()
-            .iterator(chunk_size=BATCH_SIZE)
-        ):
-            identity = identity_for(self.plugin, rel.series, "series")
-            owned_show = (
-                self.snapshot is not None
-                and self.settings.get("media_tv_mode", "show") == "show"
-                and self.snapshot.owns(identity)
-            )
-            if self.tracked_series(identity) and not owned_show:
-                with self.measure("provider_episode_refresh", 1):
-                    self.refresh_complete(rel, refresh_series_episodes)
-                refreshed = True
-        return refreshed
-
-    def tracked_series(self, identity):
-        # Separate probes use all columns of the existing indices. A combined
-        # OR only used their kind prefix, scanning every tracked episode per show.
-        for column, value in (("tmdb", identity.tmdb), ("imdb", identity.imdb)):
-            if (
-                value
-                and self.store.db.execute(
-                    f"SELECT 1 FROM files WHERE kind='series' AND {column}=? LIMIT 1",
-                    (value,),
-                ).fetchone()
-            ):
-                return True
-        if not identity.year:
-            return False
-        return bool(
-            self.store.db.execute(
-                """SELECT 1 FROM files WHERE kind='series' AND title=? AND year=?
-               AND (tmdb='' OR ?='' OR tmdb=?)
-               AND (imdb='' OR ?='' OR imdb=?) LIMIT 1""",
-                (
-                    identity.title,
-                    str(identity.year),
-                    identity.tmdb,
-                    identity.tmdb,
-                    identity.imdb,
-                    identity.imdb,
-                ),
-            ).fetchone()
-        )
-
-    @staticmethod
-    def refresh_complete(rel, refresher):
-        # Dispatcharr's task swallows exceptions. Verify the provider response
-        # and the persisted completion timestamp rather than trusting its return.
-        from core.xtream_codes import Client
-
-        account = rel.m3u_account
-        with Client(
-            account.server_url,
-            account.username,
-            account.password,
-            account.get_user_agent_string(),
-        ) as client:
-            info = client.get_series_info(rel.external_series_id)
-        if not isinstance(info, dict) or not isinstance(info.get("episodes"), dict):
-            raise ValueError("Incomplete provider episode response")
-        expected = set()
-        for season, episodes in info["episodes"].items():
-            if int(season) < 0:
-                raise ValueError("Invalid provider season")
-            if not isinstance(episodes, list) or any(
-                not isinstance(e, dict) or not e.get("id") for e in episodes
-            ):
-                raise ValueError("Invalid provider episode response")
-            for episode in episodes:
-                if int(episode.get("episode_num", -1)) < 0:
-                    raise ValueError("Invalid provider episode number")
-                expected.add(str(episode["id"]))
-        previous = rel.last_episode_refresh
-        # A truthy empty season avoids Dispatcharr fetching an empty response again.
-        refresher(
-            account=account,
-            series=rel.series,
-            external_series_id=rel.external_series_id,
-            episodes_data=info["episodes"] or {"0": []},
-        )
-        rel.refresh_from_db()
-        if rel.last_episode_refresh is None or rel.last_episode_refresh == previous:
-            raise ValueError("Provider episode refresh did not complete")
-        from apps.vod.models import M3UEpisodeRelation
-
-        actual = {
-            str(value)
-            for value in M3UEpisodeRelation.objects.filter(
-                m3u_account=account, episode__series=rel.series
-            )
-            .values_list("stream_id", flat=True)
-            .iterator(chunk_size=BATCH_SIZE)
-        }
-        if actual != expected:
-            raise ValueError("Provider episode refresh was incomplete")
 
     def writable(self, path, uuid, kind):
         with self.measure('output_guard', 1, worker=True):
