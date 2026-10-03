@@ -657,6 +657,10 @@ class Reconciliation:
             raise ValueError("Provider episode refresh was incomplete")
 
     def writable(self, path, uuid, kind):
+        with self.measure('output_guard', 1, worker=True):
+            return self._writable(path, uuid, kind)
+
+    def _writable(self, path, uuid, kind):
         if not contained(path, self.roots):
             return False
         if not os.path.lexists(path):
@@ -862,6 +866,19 @@ class Reconciliation:
                 self.report["excluded"] += 1
         return owned
 
+    def series_ownership(self, series):
+        # Refresh may fill identity metadata; take this snapshot afterwards.
+        matches = self.snapshot.matches(identity_for(self.plugin, series, 'series')) if self.snapshot else []
+        show_owned = bool(matches) and self.settings.get('media_tv_mode', 'show') == 'show'
+        positions = {position for match in matches for position in match.episodes}
+        def owned(position):
+            result = show_owned or position in positions
+            if result:
+                with self.counter_lock:
+                    self.report['excluded'] += 1
+            return result
+        return owned
+
     def record(self, path, obj, kind, rel, position=None, nfos=None):
         record = (
             path,
@@ -870,12 +887,13 @@ class Reconciliation:
             position,
             nfos,
         )
-        while not self.cancelled.is_set():
-            try:
-                self.queue.put(record, timeout=0.1)
-                return
-            except Full:
-                continue
+        with self.measure('inventory_enqueue', 1, worker=True):
+            while not self.cancelled.is_set():
+                try:
+                    self.queue.put(record, timeout=0.1)
+                    return
+                except Full:
+                    continue
         raise RuntimeError("Inventory writes cancelled after action failure")
 
     def drain(self):
@@ -887,7 +905,7 @@ class Reconciliation:
                 break
         if records:
             try:
-                with self.measure('inventory_record', len(records)):
+                with self.measure('inventory_record', len(records), worker=True):
                     self.store.record_many(records)
             except Exception:
                 # Never checkpoint output decisions whose ownership write failed.
@@ -901,7 +919,7 @@ class Reconciliation:
             except Empty:
                 break
         if decisions and not self.inventory_write_failed:
-            with self.measure('inventory_checkpoint', len(decisions)), self.store.db:
+            with self.measure('inventory_checkpoint', len(decisions), worker=True), self.store.db:
                 self.store.db.executemany(
                     'INSERT OR REPLACE INTO generation_entries VALUES (?,?,?,?)', decisions,
                 )
@@ -910,12 +928,13 @@ class Reconciliation:
         path = os.path.abspath(path) if path else ''
         if threading.get_ident() == self.action_thread and self.cache_queue.full():
             self.drain()
-        while not self.cancelled.is_set():
-            try:
-                self.cache_queue.put((kind, key, value, path), timeout=0.1)
-                return
-            except Full:
-                continue
+        with self.measure('checkpoint_enqueue', 1, worker=True):
+            while not self.cancelled.is_set():
+                try:
+                    self.cache_queue.put((kind, key, value, path), timeout=0.1)
+                    return
+                except Full:
+                    continue
         raise RuntimeError('Generation decisions cancelled after action failure')
 
     def movies(self, query):

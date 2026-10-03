@@ -1,7 +1,7 @@
 """
 VOD to Media Library — Dispatcharr VOD .strm Generator Plugin
 (slug: vod2mlib)
-v1.20.0-rc.2 — independent movie and series metadata filters.
+v1.20.0-rc.3 — independent movie and series metadata filters.
 
 MIT License
 Copyright (c) 2025-2026 shedunraid (original author)
@@ -41,7 +41,7 @@ class Plugin:
     """Generate .strm files for VOD movies from Dispatcharr."""
 
     name = "VOD to Media Library"
-    version = "1.20.0-rc.2"
+    version = "1.20.0-rc.3"
     help_url = "https://github.com/R3XCHRIS/VOD2MLIB#readme"
     description = (
         "Convert Dispatcharr VODs into media-server-friendly .strm files, with "
@@ -293,6 +293,7 @@ class Plugin:
                    "result. For a big catalogue don't use 'All' here: set the cron to 'Full rescan' and click "
                    '[SCHEDULE] Apply / Update. Scheduled runs execute on the Celery worker with no HTTP '
                    'timeout.'},
+     {'id': 'series_workers', 'label': 'Parallel Series Workers', 'type': 'select', 'default': '3', 'options': [{'value': '1', 'label': '1'}, {'value': '2', 'label': '2'}, {'value': '3', 'label': '3'}, {'value': '4', 'label': '4'}, {'value': '5', 'label': '5'}, {'value': '6', 'label': '6'}], 'help_text': 'Concurrent series refresh and generation tasks. Default 3; increase after measuring provider and storage performance. Movies continue using 3 workers.'},
      {'id': 'generate_series_nfo',
       'label': 'Generate Series NFO Files',
       'type': 'boolean',
@@ -568,6 +569,7 @@ class Plugin:
             return action_runner.stop()
         try:
             configuration(settings)
+            self._series_worker_count(settings)
         except ValueError as error:
             return {"status": "error", "message": str(error)}
         if action in {"generate_movies", "generate_series", "rescan_all", "cleanup_movies", "cleanup_series", "preview_cleanup", "selective_cleanup", "list_media_libraries", "rebuild_inventory"}:
@@ -588,6 +590,7 @@ class Plugin:
         reconciliation = None
         try:
             configuration(settings)
+            self._series_worker_count(settings)
             with action_lock(state_directory()):
                 reconciliation = Reconciliation(self, settings, logger, state_directory())
                 self._reconciliation = reconciliation
@@ -1194,10 +1197,18 @@ class Plugin:
         except OSError:
             return False
 
+    @staticmethod
+    def _series_worker_count(settings):
+        value = str(settings.get('series_workers', '3'))
+        if not value.isascii() or not value.isdigit() or not 1 <= int(value) <= 6:
+            raise ValueError('Parallel series workers must be an integer from 1 to 6')
+        return int(value)
+
     def _generate_series(self, settings: Dict[str, Any], logger):
         """Generate series .strm files with episodes using parallel processing."""
         try:
             filter_rules = configuration(settings)
+            workers = self._series_worker_count(settings)
         except ValueError as error:
             return {"status": "error", "message": str(error)}
         series_root = settings.get("series_root_folder", "/VODS/Series")
@@ -1225,7 +1236,7 @@ class Plugin:
             "Refresh Existing": "Yes" if refresh_existing else "No",
             "Nest by category": "Yes" if nest_by_cat else "No",
             "Dedupe across cats": "Yes" if dedupe_across_cats else "No",
-            "Workers": self.MAX_WORKERS,
+            "Workers": workers,
         })
 
         try:
@@ -1315,15 +1326,15 @@ class Plugin:
                     f"{refreshed_strm:,} refreshed; {errors:,} errors")
                 last_progress = now
 
-        logger.info("Processing series with %d parallel workers", self.MAX_WORKERS)
-        with ThreadPoolExecutor(max_workers=self.MAX_WORKERS) as executor:
+        logger.info("Processing series with %d parallel workers", workers)
+        with ThreadPoolExecutor(max_workers=workers) as executor:
             try:
                 futures = {}
                 exhausted = False
                 idx = 0
                 progress(force=True)
                 while futures or not exhausted:
-                    while not exhausted and len(futures) < self.MAX_WORKERS:
+                    while not exhausted and len(futures) < workers:
                         try: rel = next(to_process)
                         except StopIteration:
                             exhausted = True
@@ -1494,6 +1505,9 @@ class Plugin:
                     "message": f"{series_name} - No episodes found",
                 }
 
+            with rec.measure('episode_ownership', 1, worker=True) if rec else nullcontext():
+                episode_owned = rec.series_ownership(series) if rec else lambda position: False
+
             with rec.measure('series_files', episode_count, worker=True) if rec else nullcontext():
                 if not contained(series_folder, [series_root]):
                     raise ValueError("Series folder resolves outside configured root")
@@ -1524,7 +1538,7 @@ class Plugin:
                     episode = episode_rel.episode
                     season_num = episode.season_number or 0
                     episode_num = episode.episode_number or 0
-                    if self._owned(series, "series", (season_num, episode_num)):
+                    if episode_owned((season_num, episode_num)):
                         continue
                     generated_nfos = dict(shared_nfos)
 
@@ -2493,7 +2507,7 @@ class Plugin:
         }
         changed = {k for k in stored if stored.get(k) != current.get(k)}
         changed.update(
-            field['id'] for field in FILTER_FIELDS
+            field['id'] for field in [*FILTER_FIELDS, {'id': 'series_workers', 'default': '3'}]
             if field['id'] not in stored
             and current.get(field['id'], field['default']) != field['default']
         )

@@ -76,6 +76,11 @@ def strm_contents(path):
 
 
 def contained(path, roots):
+    # Try the lexical parent first, but still resolve both sides below. This only
+    # changes lookup order: aliases and symlink escapes retain their semantics.
+    absolute = os.path.normcase(os.path.abspath(path))
+    roots = sorted(roots, key=lambda root: not absolute.startswith(
+        os.path.normcase(os.path.abspath(root)).rstrip(os.sep) + os.sep))
     resolved = os.path.realpath(path)
     for root in roots:
         base = os.path.realpath(root)

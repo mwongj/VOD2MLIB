@@ -319,3 +319,8 @@ Filters read Dispatcharr model metadata directly, without NFOs, Emby enrichment,
 Filtering happens before deduplication, batch selection, and episode fetching. Rejected titles create no output and are not refreshed. Existing files remain in place: metadata filters never establish upstream removal, and source-presence cleanup continues to check the complete unfiltered Dispatcharr catalogue. Existing Emby/M3U cleanup policies still apply independently. Incremental decisions include filter settings and relevant metadata, so later changes are reevaluated.
 
 Save settings and run **Catalogue snapshot** to inspect eligibility. Re-click **Apply / Update** after changing filter settings so the schedule captures the new values.
+
+
+Parallel Series Workers (under SERIES) defaults to 3 and accepts 1-6 workers. It controls series refresh/generation concurrency; movie concurrency stays at 3. Worker-count changes do not invalidate output signatures. Apply/Update the schedule after changing it if scheduled runs should use the new value. Increase concurrency only after comparing the same workload and checking provider errors.
+
+Containment validation checks a lexically matching root first while still resolving the candidate and root on every check, preserving alias and symlink-escape behavior. Series ownership matching is calculated once after provider refresh and reused for episode positions against the immutable library snapshot. Telemetry separates `output_guard`, `episode_ownership`, `inventory_enqueue`, and `checkpoint_enqueue`; enqueue durations include queue blocking and overhead. Inventory record/checkpoint CPU timings now use the action thread CPU clock to exclude concurrent generation work.

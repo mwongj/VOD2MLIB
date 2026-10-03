@@ -1,6 +1,6 @@
 {
   "name": "VOD to Media Library",
-  "version": "1.20.0-rc.2",
+  "version": "1.20.0-rc.3",
   "description": "VOD → media library bridge. Generates .strm + NFO files from Dispatcharr's VOD catalogue, with optional cron-driven auto-rescan that picks up newly-added episodes.",
   "author": "R3XCHRIS",
   "license": "MIT",
@@ -191,6 +191,39 @@
         }
       ],
       "help_text": "Number of series to process per click (episodes are auto-fetched for each, so series are much slower than movies). ⚠ This button runs synchronously and your reverse proxy will usually cut it off after ~60s with a 504 — the run keeps going server-side, but you lose the result. For a big catalogue don't use 'All' here: set the cron to 'Full rescan' and click [SCHEDULE] Apply / Update. Scheduled runs execute on the Celery worker with no HTTP timeout."
+    },
+    {
+      "id": "series_workers",
+      "label": "Parallel Series Workers",
+      "type": "select",
+      "default": "3",
+      "options": [
+        {
+          "value": "1",
+          "label": "1"
+        },
+        {
+          "value": "2",
+          "label": "2"
+        },
+        {
+          "value": "3",
+          "label": "3"
+        },
+        {
+          "value": "4",
+          "label": "4"
+        },
+        {
+          "value": "5",
+          "label": "5"
+        },
+        {
+          "value": "6",
+          "label": "6"
+        }
+      ],
+      "help_text": "Concurrent series refresh and generation tasks. Default 3; increase after measuring provider and storage performance. Movies continue using 3 workers."
     },
     {
       "id": "generate_series_nfo",

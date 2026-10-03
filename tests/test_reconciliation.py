@@ -20,6 +20,71 @@ from reconciliation import Reconciliation
 LOG = logging.getLogger(__name__)
 
 
+def test_containment_checks_matching_root_first_without_skipping_resolution(tmp_path, monkeypatch):
+    movie, series = tmp_path / 'Movies', tmp_path / 'Series'
+    series.mkdir()
+    calls = []
+    original = os.path.realpath
+    def resolve(path):
+        calls.append(str(path))
+        return original(path)
+    monkeypatch.setattr(os.path, 'realpath', resolve)
+    path = series / 'Show' / 'episode.strm'
+    assert contained(path, [movie, series])
+    assert calls == [str(path), str(series)]
+    # Reordering never makes lexical containment sufficient for an escaped path.
+    assert not contained(series / '..' / 'outside.strm', [movie, series])
+
+
+def test_series_ownership_matches_once_and_preserves_episode_exclusions(library, monkeypatch):
+    show = media(10)
+    rec = Reconciliation(library.p, {**library.settings, 'media_tv_mode': 'episodes'}, LOG, library.tmp / 'ownership')
+    rec.snapshot = Snapshot([owned(show, 'series', [(1, 1), (1, 2)])])
+    calls = []
+    original = rec.snapshot.matches
+    monkeypatch.setattr(rec.snapshot, 'matches', lambda identity: calls.append(identity) or original(identity))
+    try:
+        check = rec.series_ownership(show)
+        assert check((1, 1)) and check((1, 2)) and not check((1, 3))
+        assert len(calls) == 1 and rec.report['excluded'] == 2
+    finally:
+        rec.store.close()
+
+
+@pytest.mark.parametrize('value', ['0', '7', '3.0', '', '-1', True, None, '٣'])
+def test_invalid_worker_count_stops_before_reconciliation(library, monkeypatch, value):
+    monkeypatch.setattr(Reconciliation, 'prepare', lambda *args: pytest.fail('Reconciliation started'))
+    result = library.run('generate_series', series_workers=value)
+    assert result['status'] == 'error' and 'workers' in result['message']
+
+
+def test_series_uses_configured_worker_pool_without_changing_output(library, monkeypatch):
+    import plugin
+    show = media(10)
+    library.rows['series'].append(relation(show, 'series'))
+    library.rows['episodes'].append(relation(
+        media(1, series=show, season_number=1, episode_number=1), 'episode'))
+    pools = []
+    executor = plugin.ThreadPoolExecutor
+    def pool(*args, **kwargs):
+        pools.append(kwargs['max_workers'])
+        return executor(*args, **kwargs)
+    monkeypatch.setattr(plugin, 'ThreadPoolExecutor', pool)
+    result = library.run('generate_series', series_workers='6', refresh_existing=True)
+    assert pools == [6] and result['episodes_created'] == 1 and result['errors'] == 0
+    metrics = result['reconciliation']['timings']
+    assert metrics['output_guard']['calls'] == 1
+    assert metrics['episode_ownership']['calls'] == 1
+    assert metrics['inventory_enqueue']['items'] == 1
+    assert metrics['checkpoint_enqueue']['items'] == 1
+
+
+def test_nondefault_worker_count_reports_schedule_drift(library):
+    task = NS(kwargs='{"settings": {}}')
+    assert 'series_workers' not in library.p._settings_drift_keys(task, {'series_workers': '3'})
+    assert 'series_workers' in library.p._settings_drift_keys(task, {'series_workers': '6'})
+
+
 def test_series_generation_reports_work_and_avoids_repeated_directory_setup(library, monkeypatch):
     show = media(10)
     library.rows['series'].append(relation(show, 'series'))
