@@ -6,6 +6,7 @@ import logging
 import os
 import sqlite3
 import sys
+from itertools import count
 from pathlib import Path
 from types import SimpleNamespace as NS
 
@@ -41,7 +42,7 @@ class Query:
                 if part.endswith("_id") and not hasattr(row, part):
                     row = getattr(row, part[:-3]).id
                 else:
-                    row = getattr(row, part)
+                    row = getattr(row, part) if row is not None else None
             return row
         return Query([tuple(resolve(row, field) for field in fields) for row in self.rows])
 
@@ -56,6 +57,8 @@ class Query:
 
     def filter(self, **kwargs):
         def matches(rel):
+            if 'id__in' in kwargs:
+                return rel.id in kwargs['id__in']
             return all(
                 (
                     getattr(rel.episode, "series", None)
@@ -86,8 +89,12 @@ def media(id, kind="movie", **values):
     return NS(**defaults)
 
 
+RELATION_IDS = count(1)
+
+
 def relation(obj, kind="movie", stream=None):
     return NS(
+        id=next(RELATION_IDS),
         **{kind: obj},
         m3u_account_id=1,
         m3u_account=NS(id=1),
@@ -437,7 +444,7 @@ def test_schema_persistence_missing_files_and_rollback(tmp_path):
     file.write_text("url")
     identity = Identity("movie", "A", 2000, "1")
     store.record(str(file), identity, "source")
-    assert store.db.execute("PRAGMA user_version").fetchone()[0] == 2
+    assert store.db.execute("PRAGMA user_version").fetchone()[0] == 3
     store.close()
     store = InventoryStore(tmp_path / "state")
     assert list(store.rows())[0]["tmdb"] == "1"
@@ -452,6 +459,140 @@ def test_schema_persistence_missing_files_and_rollback(tmp_path):
     store.close()
 
 
+def test_incremental_movies_skip_filesystem_and_only_hydrate_changes(library, monkeypatch):
+    library.rows['movies'].extend(relation(media(n)) for n in range(1, 4))
+    assert library.run()['created_strm'] == 3
+    original_exists, original_lexists = os.path.exists, os.path.lexists
+
+    def guard(original):
+        def checked(path):
+            assert not str(path).endswith('.strm'), 'Unchanged STRM was checked'
+            return original(path)
+        return checked
+
+    with monkeypatch.context() as m:
+        m.setattr(os.path, 'exists', guard(original_exists))
+        m.setattr(os.path, 'lexists', guard(original_lexists))
+        result = library.run()
+    assert result['created_strm'] == 0
+    assert result['scanned'] == 0
+    assert result['unchanged_candidates'] == 3
+    library.rows['movies'].append(relation(media(4)))
+    result = library.run()
+    assert result['created_strm'] == result['scanned'] == 1
+    assert result['unchanged_candidates'] == 3
+
+
+def test_incremental_source_changes_settings_and_relation_replacement(library):
+    rel = relation(media(1))
+    library.rows['movies'].append(rel)
+    library.run()
+    rel.id += 10000  # Sync replaced the Django row, same stable source.
+    assert library.run()['scanned'] == 0
+    rel.stream_id = 'new-provider-stream'
+    result = library.run()
+    assert result['refreshed_strm'] == 1
+    path = next(Path(library.settings['root_folder']).rglob('*.strm'))
+    assert 'new-provider-stream' in path.read_text()
+    result = library.run(omit_stream_id=True)
+    assert result['refreshed_strm'] == 1
+    assert 'stream_id' not in path.read_text()
+
+
+def test_incremental_batches_do_not_checkpoint_unprocessed_candidates(library):
+    library.rows['movies'].extend(relation(media(n)) for n in range(1, 4))
+    for _ in range(3):
+        assert library.run(batch_size='1')['created_strm'] == 1
+    assert library.run(batch_size='1')['scanned'] == 0
+
+
+def test_incremental_projection_crosses_lookup_and_write_batches(library):
+    library.rows['movies'].extend(relation(media(n)) for n in range(1, BATCH_SIZE + 3))
+    result = library.run(generate_nfo=False)
+    assert result['created_strm'] == BATCH_SIZE + 2
+    result = library.run(generate_nfo=False)
+    assert result['scanned'] == 0
+    assert result['unchanged_candidates'] == BATCH_SIZE + 2
+    assert result['reconciliation']['timings']['incremental_movie_read']['items'] == BATCH_SIZE + 2
+
+
+def test_external_removal_requires_rebuild_and_missing_root_invalidates_cache(library):
+    library.rows['movies'].append(relation(media(1)))
+    library.run()
+    path = next(Path(library.settings['root_folder']).rglob('*.strm'))
+    path.unlink()
+    assert library.run()['created_strm'] == 0
+    assert library.run('rebuild_inventory')['status'] == 'ok'
+    assert library.run()['created_strm'] == 1
+    import shutil
+    shutil.rmtree(library.settings['root_folder'])
+    assert library.run()['created_strm'] == 1
+
+
+def test_incremental_failed_write_is_retried(library, monkeypatch):
+    library.rows['movies'].append(relation(media(1)))
+    original = library.p._write_if_different_preserve_times
+    def failure(*args):
+        raise OSError('test write failure')
+    monkeypatch.setattr(library.p, '_write_if_different_preserve_times', failure)
+    assert library.run()['errors'] == 1
+    monkeypatch.setattr(library.p, '_write_if_different_preserve_times', original)
+    assert library.run()['created_strm'] == 1
+
+
+def test_incremental_ownership_write_failure_does_not_checkpoint(library, monkeypatch):
+    library.rows['movies'].append(relation(media(1)))
+    original = InventoryStore.record_many
+    def failure(*args):
+        raise sqlite3.OperationalError('test transaction failure')
+    with monkeypatch.context() as m:
+        m.setattr(InventoryStore, 'record_many', failure)
+        assert library.run()['status'] == 'error'
+    result = library.run()
+    assert result['scanned'] == 1
+    store = InventoryStore(library.tmp / 'state')
+    assert len(list(store.rows())) == 1
+    store.close()
+
+
+def test_incremental_upgrade_seeds_verified_inventory_without_file_reads(library, monkeypatch):
+    library.rows['movies'].append(relation(media(1)))
+    library.run()
+    store = InventoryStore(library.tmp / 'state')
+    with store.db:
+        store.db.execute('DELETE FROM generation_entries')
+        store.db.execute('DELETE FROM generation_state')
+        store.db.execute('PRAGMA user_version=2')
+    store.close()
+    original = os.path.exists
+    def guard(path):
+        assert not str(path).endswith('.strm')
+        return original(path)
+    with monkeypatch.context() as m:
+        m.setattr(os.path, 'exists', guard)
+        result = library.run()
+    assert result['scanned'] == 0
+    assert result['unchanged_candidates'] == 1
+
+
+def test_incremental_episode_outputs_retain_provider_refresh_and_skip_unchanged(library, monkeypatch):
+    show = media(10)
+    library.rows['series'].append(relation(show, 'series'))
+    library.rows['episodes'].append(relation(media(1, series=show, season_number=1, episode_number=1), 'episode'))
+    assert library.run('generate_series', refresh_existing=True)['episodes_created'] == 1
+    before = len(library.calls)
+    original = os.path.isfile
+    def guard(path):
+        assert not str(path).endswith('.strm'), 'Unchanged episode was checked'
+        return original(path)
+    with monkeypatch.context() as m:
+        m.setattr(os.path, 'isfile', guard)
+        result = library.run('generate_series', refresh_existing=True)
+    assert len(library.calls) == before + 1
+    assert result['episodes_created'] == 0
+    assert result['reconciliation']['generation_unchanged'] == 1
+    library.rows['episodes'].append(relation(media(2, series=show, season_number=1, episode_number=2), 'episode'))
+    assert library.run('generate_series', refresh_existing=True)['episodes_created'] == 1
 def test_path_containment(tmp_path):
     root = tmp_path / "media"
     root.mkdir()
@@ -1286,7 +1427,7 @@ def test_discovery_markers_survive_schema_one_upgrade(tmp_path):
     store.db.execute("DROP TABLE discovery_roots")
     store.db.execute("PRAGMA user_version=1"); store.close()
     store = InventoryStore(tmp_path / "state")
-    assert store.db.execute("PRAGMA user_version").fetchone()[0] == 2
+    assert store.db.execute("PRAGMA user_version").fetchone()[0] == 3
     assert [tuple(row) for row in store.rows()] == before
     store.mark_discovered("root", "context"); store.close()
     store = InventoryStore(tmp_path / "state")

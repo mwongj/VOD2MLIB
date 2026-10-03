@@ -17,6 +17,7 @@ from urllib.parse import parse_qs, urlparse
 
 try:
     from .inventory import BATCH_SIZE, InventoryStore, contained, strm_contents
+    from .generation_cache import movie_candidates, signature
     from .media_library import (
         Identity,
         LibrarySelectionError,
@@ -25,6 +26,7 @@ try:
     )
 except ImportError:
     from inventory import BATCH_SIZE, InventoryStore, contained, strm_contents
+    from generation_cache import movie_candidates, signature
     from media_library import (
         Identity,
         LibrarySelectionError,
@@ -73,6 +75,8 @@ class Reconciliation:
         self.store = InventoryStore(directory)
         self.snapshot = None
         self.queue = Queue(maxsize=BATCH_SIZE)
+        self.cache_queue = Queue(maxsize=BATCH_SIZE)
+        self.action_thread = threading.get_ident()
         self.counter_lock = threading.Lock()
         self.cancelled = threading.Event()
         self.report = {
@@ -91,12 +95,21 @@ class Reconciliation:
             "catalogue_modes": [],
             "discovery_scanned_roots": 0,
             "discovery_skipped_roots": 0,
+            "generation_checked": 0,
+            "generation_unchanged": 0,
+            "generation_candidates": 0,
+            "generation_deduped": 0,
         }
         self.roots = [
             settings.get("root_folder", "/VODS/Movies"),
             settings.get("series_root_folder", "/VODS/Series"),
         ]
         self.m3u_complete = False
+        self.verify_missing = True
+        self.bootstrap_movies = not self.store.db.execute(
+            "SELECT 1 FROM generation_state WHERE key='movies_initialized'",
+        ).fetchone()
+        self.inventory_write_failed = False
 
     @contextmanager
     def measure(self, name, items=0):
@@ -168,7 +181,21 @@ class Reconciliation:
         self.logger.warning(message)
 
     def prepare(self, action):
+        self.verify_missing = action not in ('generate_movies', 'generate_series', 'rescan_all')
+        if not os.path.isdir(self.roots[0]):
+            with self.store.db:
+                self.store.db.execute("DELETE FROM generation_entries WHERE kind='movie'")
+                self.store.db.execute("INSERT OR REPLACE INTO generation_state VALUES ('movies_initialized','1')")
+            self.bootstrap_movies = False
+        if not os.path.isdir(self.roots[1]):
+            with self.store.db:
+                self.store.db.execute("DELETE FROM generation_entries WHERE kind LIKE 'episode:%'")
         if action == "rebuild_inventory":
+            # Explicitly recheck externally changed/deleted outputs next generation.
+            with self.store.db:
+                self.store.db.execute('DELETE FROM generation_entries')
+                self.store.db.execute("INSERT OR REPLACE INTO generation_state VALUES ('movies_initialized','1')")
+            self.bootstrap_movies = False
             # Discover output without any media-server checks, provider refreshes
             # or deletion. Existing ownership and generated NFO hashes survive.
             with self.measure("catalogue"):
@@ -688,7 +715,7 @@ class Reconciliation:
             )
             absent = m3u and self.store.absent(row["path"])
             if not duplicate and not absent:
-                if not dry_run and not os.path.lexists(row["path"]):
+                if self.verify_missing and not dry_run and not os.path.lexists(row["path"]):
                     self.store.forget(row["path"])
                     self.report["missing"] += 1
                 continue
@@ -749,4 +776,58 @@ class Reconciliation:
             except Empty:
                 break
         if records:
-            self.store.record_many(records)
+            try:
+                self.store.record_many(records)
+            except Exception:
+                # Never checkpoint output decisions whose ownership write failed.
+                self.inventory_write_failed = True
+                self.cancelled.set()
+                raise
+        decisions = []
+        while len(decisions) < BATCH_SIZE:
+            try:
+                decisions.append(self.cache_queue.get_nowait())
+            except Empty:
+                break
+        if decisions and not self.inventory_write_failed:
+            with self.store.db:
+                self.store.db.executemany(
+                    'INSERT OR REPLACE INTO generation_entries VALUES (?,?,?,?)', decisions,
+                )
+
+    def cache_complete(self, kind, key, value, path):
+        if threading.get_ident() == self.action_thread and self.cache_queue.full():
+            self.drain()
+        while not self.cancelled.is_set():
+            try:
+                self.cache_queue.put((kind, key, value, path), timeout=0.1)
+                return
+            except Full:
+                continue
+        raise RuntimeError('Generation decisions cancelled after action failure')
+
+    def movies(self, query):
+        root = self.settings.get('root_folder', '/VODS/Movies')
+        if not os.path.isdir(root):
+            # A removed root must not leave cached output decisions authoritative.
+            with self.store.db:
+                self.store.db.execute("DELETE FROM generation_entries WHERE kind='movie'")
+        return movie_candidates(self, query, self.settings)
+
+    def episode_cache(self, kind):
+        # Workers only read SQLite; the action thread commits successful decisions.
+        uri = Path(self.store.db_path).resolve().as_uri() + '?mode=ro'
+        db = sqlite3.connect(uri, uri=True)
+        try:
+            return dict(db.execute(
+                'SELECT source,signature FROM generation_entries WHERE kind=?', (kind,),
+            ))
+        finally:
+            db.close()
+
+    def episode_decision(self, rel, path):
+        ep = rel.episode
+        return str(ep.uuid), signature(self.settings, [
+            rel.m3u_account_id, rel.stream_id, str(ep.uuid), ep.name,
+            ep.season_number, ep.episode_number, path,
+        ])

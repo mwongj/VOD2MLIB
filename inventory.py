@@ -97,7 +97,7 @@ class InventoryStore:
         # tables on disk and leave persistent inventory durability unchanged.
         self.db.execute("PRAGMA temp.cache_size=-32768")
         version = self.db.execute("PRAGMA user_version").fetchone()[0]
-        if version not in (0, 1, 2):
+        if version not in (0, 1, 2, 3):
             self.db.close()
             raise ValueError("Unsupported inventory schema")
         with self.db:
@@ -116,7 +116,13 @@ class InventoryStore:
                 CREATE INDEX IF NOT EXISTS source_ids ON sources(source);
                 CREATE TABLE IF NOT EXISTS discovery_roots (
                     root TEXT PRIMARY KEY, context TEXT NOT NULL, completed_at REAL NOT NULL);
-                PRAGMA user_version=2;
+                CREATE TABLE IF NOT EXISTS generation_entries (
+                    kind TEXT NOT NULL, source TEXT NOT NULL, signature TEXT NOT NULL,
+                    path TEXT NOT NULL, PRIMARY KEY(kind,source));
+                CREATE INDEX IF NOT EXISTS generation_paths ON generation_entries(path);
+                CREATE TABLE IF NOT EXISTS generation_state (
+                    key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                PRAGMA user_version=3;
                 COMMIT;
             """)
         self.db.execute("CREATE TEMP TABLE live(source TEXT PRIMARY KEY)")
@@ -209,6 +215,7 @@ class InventoryStore:
 
     def forget(self, path):
         with self.db:
+            self.db.execute("DELETE FROM generation_entries WHERE path=?", (path,))
             self.db.execute("DELETE FROM sources WHERE path=?", (path,))
             self.db.execute("DELETE FROM files WHERE path=?", (path,))
 

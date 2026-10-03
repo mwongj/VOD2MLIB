@@ -1,6 +1,6 @@
 {
   "name": "VOD to Media Library",
-  "version": "1.19.0-rc.10",
+  "version": "1.19.0-rc.11",
   "description": "VOD → media library bridge. Generates .strm + NFO files from Dispatcharr's VOD catalogue, with optional cron-driven auto-rescan that picks up newly-added episodes.",
   "author": "R3XCHRIS",
   "license": "MIT",
@@ -443,7 +443,7 @@
     {
       "id": "rebuild_inventory",
       "label": "[LIBRARY] Rebuild / discover inventory",
-      "description": "Rescan configured output roots and adopt recognizable generated STRMs copied or restored outside the plugin. Preserves existing ownership and NFO hashes; deletes no output files. Unverified files are preserved and reported."
+      "description": "Reconcile external filesystem changes and discover recognizable generated STRMs. Resets generation decisions so the next generation rechecks all eligible output, including missing files. Preserves ownership and NFO hashes; deletes no output files. Unverified files are preserved and reported."
     },
     {
       "id": "list_media_libraries",

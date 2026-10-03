@@ -1,7 +1,7 @@
 """
 VOD to Media Library — Dispatcharr VOD .strm Generator Plugin
 (slug: vod2mlib)
-v1.19.0-rc.10 — optional Emby reconciliation and persistent SQLite ownership tracking.
+v1.19.0-rc.11 — incremental generation and persistent SQLite ownership tracking.
 
 MIT License
 Copyright (c) 2025-2026 shedunraid (original author)
@@ -36,7 +36,7 @@ class Plugin:
     """Generate .strm files for VOD movies from Dispatcharr."""
 
     name = "VOD to Media Library"
-    version = "1.19.0-rc.10"
+    version = "1.19.0-rc.11"
     help_url = "https://github.com/R3XCHRIS/VOD2MLIB#readme"
     description = (
         "Convert Dispatcharr VODs into media-server-friendly .strm files, with "
@@ -450,7 +450,7 @@ class Plugin:
 
     actions = [{'id': 'rebuild_inventory',
       'label': '[LIBRARY] Rebuild / discover inventory',
-      'description': 'Rescan configured output roots and adopt recognizable generated STRMs copied or restored outside the plugin. Preserves existing ownership and NFO hashes; deletes no output files. Unverified files are preserved and reported.'},
+      'description': 'Reconcile external filesystem changes and discover recognizable generated STRMs. Resets generation decisions so the next generation rechecks all eligible output, including missing files. Preserves ownership and NFO hashes; deletes no output files. Unverified files are preserved and reported.'},
      {'id': 'list_media_libraries',
       'label': 'List media libraries',
       'description': 'List Emby library names and IDs.'},
@@ -623,7 +623,13 @@ class Plugin:
 
     def _drain_inventory(self):
         rec = getattr(self, '_reconciliation', None)
-        if rec and rec.queue.qsize() >= BATCH_SIZE: rec.drain()
+        if rec and (rec.queue.qsize() >= BATCH_SIZE or rec.cache_queue.qsize() >= BATCH_SIZE): rec.drain()
+
+    def _movie_complete(self, relation, path):
+        rec = getattr(self, '_reconciliation', None)
+        decision = getattr(relation, '_generation_signature', None)
+        if rec and decision:
+            rec.cache_complete('movie', *decision, path)
 
     def _timed_operation(self, name, function, *args, **kwargs):
         rec = getattr(self, "_reconciliation", None)
@@ -973,7 +979,9 @@ class Plugin:
         logger.info("Processing movies:")
         logger.info("-" * 60)
 
-        for relation in query.iterator():
+        rec = getattr(self, '_reconciliation', None)
+        relations = rec.movies(query) if rec else query.iterator()
+        for relation in relations:
             scanned += 1
             movie = relation.movie
             if self._owned(movie, "movie"):
@@ -995,10 +1003,11 @@ class Plugin:
             )
             strm_path = os.path.join(movie_folder, strm_filename)
             is_existing = os.path.exists(strm_path)
-            if is_existing and not refresh_existing:
+            if is_existing and not refresh_existing and not getattr(relation, '_generation_signature', None):
                 # Existing output was adopted before generation; no new write or
                 # inventory update is needed for a skipped file.
                 skipped += 1
+                self._movie_complete(relation, strm_path)
                 continue
             if not self._writable_strm(strm_path, movie.uuid, "movie"):
                 logger.warning("Preserving unverified or edited STRM: %s", strm_path)
@@ -1039,6 +1048,7 @@ class Plugin:
                         generated_nfos[nfo_path] = file_hash(nfo_path)
 
                 self._track(strm_path, movie, "movie", relation, nfos=generated_nfos)
+                self._movie_complete(relation, strm_path)
                 self._drain_inventory()
                 if log_this:
                     if changed:
@@ -1066,6 +1076,8 @@ class Plugin:
                         logger.info("Batch complete: %d new .strm written (scanned %d, %d already done).", created_strm, scanned, skipped)
                     break
 
+        if rec:
+            deduped += rec.report['generation_deduped']
         logger.info("")
         logger.info("=" * 60)
         logger.info("SUMMARY:")
@@ -1090,6 +1102,8 @@ class Plugin:
         logger.info("=" * 60)
 
         summary_msg = f"Wrote {created_strm} new .strm files"
+        if rec and rec.report['generation_unchanged']:
+            summary_msg += f", skipped {rec.report['generation_unchanged']} unchanged catalogue entries"
         if refresh_existing and refreshed_strm:
             summary_msg += f", refreshed {refreshed_strm}"
         if refresh_existing and unchanged_strm:
@@ -1107,6 +1121,8 @@ class Plugin:
             "total_in_db": total_count,
             "scanned": scanned,
             "created_strm": created_strm,
+            "incremental": rec is not None,
+            "unchanged_candidates": rec.report['generation_unchanged'] if rec else 0,
             "refreshed_strm": refreshed_strm,
             "unchanged_strm": unchanged_strm,
             "missing_tmdb_id": missing_tmdb_id,
@@ -1410,6 +1426,9 @@ class Plugin:
                     series_name, duplicate_rels,
                 )
             episode_count = len(episodes)
+            rec = getattr(self, '_reconciliation', None)
+            episode_cache_kind = f'episode:{series_rel.m3u_account_id}:{series.uuid}'
+            episode_cache = rec.episode_cache(episode_cache_kind) if rec else {}
 
             if episode_count == 0:
                 return {
@@ -1465,6 +1484,12 @@ class Plugin:
                 filename = self._sanitize_filename(filename)
 
                 strm_path = os.path.join(season_folder, f"{filename}.strm")
+                decision = rec.episode_decision(episode_rel, strm_path) if rec else None
+                if decision and episode_cache.get(decision[0]) == decision[1]:
+                    unchanged_episodes += 1
+                    with rec.counter_lock:
+                        rec.report['generation_unchanged'] += 1
+                    continue
                 is_existing = os.path.isfile(strm_path)
                 if is_existing and not refresh_existing:
                     continue
@@ -1494,6 +1519,8 @@ class Plugin:
                         new_nfo += 1
                         generated_nfos[nfo_path] = file_hash(nfo_path)
                 self._track(strm_path, series, "series", episode_rel, (season_num, episode_num), generated_nfos)
+                if decision:
+                    rec.cache_complete(episode_cache_kind, *decision, strm_path)
 
             if new_episodes == 0 and refreshed_episodes == 0:
                 return {
