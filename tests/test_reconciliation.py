@@ -57,17 +57,18 @@ class Query:
 
     def filter(self, **kwargs):
         def matches(rel):
-            if 'id__in' in kwargs:
-                return rel.id in kwargs['id__in']
-            return all(
-                (
-                    getattr(rel.episode, "series", None)
-                    if k == "episode__series"
-                    else getattr(rel, k)
-                )
-                == v
-                for k, v in kwargs.items()
-            )
+            for key, expected in kwargs.items():
+                is_in = key.endswith('__in')
+                field = key[:-4] if is_in else key
+                value = rel
+                for part in field.split('__'):
+                    if part.endswith('_id') and not hasattr(value, part):
+                        value = getattr(value, part[:-3]).id
+                    else:
+                        value = getattr(value, part)
+                if not (value in expected if is_in else value == expected):
+                    return False
+            return True
 
         return Query([r for r in self.rows if matches(r)])
 
@@ -944,6 +945,7 @@ def test_m3u_refresh_only_shows_with_generated_output(library, monkeypatch):
 def test_m3u_reuses_complete_census_when_no_provider_refresh(library, monkeypatch):
     library.rows["movies"].append(relation(media(1)))
     library.run()
+    library.run('preview_cleanup')  # Establish the generated root marker.
     passes = []
     census = Reconciliation.census
 
@@ -1514,7 +1516,7 @@ def test_lean_and_metadata_census_agree_on_sources_without_identity_work(library
         expected = {r[0] for r in rich.store.db.execute("SELECT source FROM live")}
         monkeypatch.setattr(library.p, "_extract_clean_name_and_year",
                             lambda *_: pytest.fail("Lean census cleaned metadata"))
-        lean.census(metadata=False)
+        lean.source_census()
         assert {r[0] for r in lean.store.db.execute("SELECT source FROM live")} == expected
         assert source_for(orphan, "episode") not in expected
         assert lean.store.db.execute("SELECT COUNT(*) FROM catalogue").fetchone()[0] == 0
@@ -1544,6 +1546,82 @@ def test_routine_m3u_uses_sources_and_rebuild_uses_metadata(library):
     assert library.run("rebuild_inventory")["reconciliation"]["catalogue_modes"] == ["metadata"]
 
 
+def test_tracked_presence_matches_complete_census_for_all_managed_sources(library):
+    from reconciliation import source_for, identity_for
+    show = media(10)
+    library.rows['series'].append(relation(show, 'series'))
+    movie = relation(media(1), stream='shared-stream')
+    other = relation(media(2), stream='shared-stream'); other.m3u_account_id = 2
+    episode = relation(media(3, series=show, season_number=0, episode_number=1), 'episode', 'shared-stream')
+    orphan = relation(media(4, series=show, season_number=1, episode_number=2), 'episode', 'orphan')
+    orphan.m3u_account_id = 2
+    missing = relation(media(5), stream='missing')
+    library.rows['movies'].extend([movie, other, relation(media(99))])
+    library.rows['episodes'].extend([episode, orphan, relation(media(98, series=show), 'episode')])
+    full = Reconciliation(library.p, library.settings, LOG, library.tmp / 'full')
+    targeted = Reconciliation(library.p, library.settings, LOG, library.tmp / 'targeted')
+    try:
+        full.source_census()
+        expected = {r[0] for r in full.store.db.execute('SELECT source FROM live')}
+        required = set()
+        for i, (rel, kind) in enumerate([(movie, 'movie'), (other, 'movie'), (episode, 'episode'), (orphan, 'episode'), (missing, 'movie')]):
+            source = source_for(rel, kind);required.add(source)
+            path = library.tmp / f'presence-{i}.strm';path.write_text('url')
+            obj = rel.movie if kind == 'movie' else show
+            targeted.store.record(str(path), identity_for(library.p, obj, 'movie' if kind == 'movie' else 'series'), source)
+        # Valid source aliases should all establish presence, rather than one
+        # JSON spelling accidentally causing another spelling to be deleted.
+        alias = json.dumps(json.loads(source_for(movie, 'movie')), separators=(',', ':'))
+        required.add(alias)
+        with targeted.store.db:
+            targeted.store.db.execute('INSERT INTO sources VALUES (?,?)', ('alias-path', alias))
+        targeted.tracked_source_census()
+        found = {r[0] for r in targeted.store.db.execute('SELECT source FROM live')}
+        assert found == (expected & required) | {alias}
+        assert source_for(orphan, 'episode') not in found
+        assert targeted.report['source_presence_requested'] == 6
+        assert targeted.report['source_presence_found'] == 4
+        assert targeted.store.db.execute('SELECT COUNT(*) FROM catalogue').fetchone()[0] == 0
+    finally:
+        full.store.close();targeted.store.close()
+
+
+def test_tracked_presence_queries_only_required_kinds_and_bounds_sources(library, monkeypatch):
+    library.rows['movies'].extend(relation(media(n)) for n in range(1, BATCH_SIZE + 3))
+    library.run(generate_nfo=False)
+    library.run('preview_cleanup')  # Establish the newly generated root marker.
+    original = Query.filter
+    calls = []
+    def observed(self, **kwargs):
+        if 'stream_id__in' in kwargs:
+            calls.append(len(kwargs['stream_id__in']))
+            assert len(kwargs['stream_id__in']) <= 900
+        return original(self, **kwargs)
+    monkeypatch.setattr(Query, 'filter', observed)
+    result = library.run('preview_cleanup', m3u_cleanup_enabled=True, batch_size='1')
+    report = result['reconciliation']
+    assert report['source_presence_requested'] == BATCH_SIZE + 2
+    assert report['source_presence_found'] == BATCH_SIZE + 2
+    assert report['source_presence_queries'] == 2
+    assert calls == [900, 102]
+    assert 'catalogue_episode_read' not in report['timings']
+    assert 'catalogue_series_read' not in report['timings']
+
+
+def test_invalid_tracked_source_disables_m3u_deletion(library):
+    library.rows['movies'].append(relation(media(1)))
+    library.run()
+    library.run('preview_cleanup')  # Discover the generated root before routine checks.
+    store = InventoryStore(library.tmp / 'state')
+    with store.db:store.db.execute("UPDATE sources SET source='unknown legacy source'")
+    store.close()
+    library.rows['movies'].clear()
+    result = library.run('selective_cleanup', m3u_cleanup_enabled=True)
+    assert result['reconciliation']['deleted'] == 0
+    assert result['reconciliation']['warnings']
+    assert len(list(Path(library.settings['root_folder']).rglob('*.strm'))) == 1
+
+
 def test_failed_lean_query_never_establishes_m3u_absence(library, monkeypatch):
     obj = media(1); library.rows["movies"].append(relation(obj))
     strm = write_external_strm(library, obj)
@@ -1567,7 +1645,7 @@ def test_after_episode_refresh_census_uses_sources_only(library, monkeypatch):
     library.run("generate_series")
     monkeypatch.setattr(Reconciliation, "refresh_complete", lambda *_: None)
     result = library.run("preview_cleanup", m3u_cleanup_enabled=True)
-    assert result["reconciliation"]["catalogue_modes"] == ["metadata", "sources"]
+    assert result["reconciliation"]["catalogue_modes"] == ["metadata", "sources", "sources"]
 
 
 def test_forced_discovery_invalidates_marker_when_root_stat_fails(library, monkeypatch):

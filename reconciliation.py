@@ -8,6 +8,7 @@ import stat
 import threading
 import time
 from contextlib import contextmanager
+from collections import defaultdict
 from dataclasses import asdict
 from functools import lru_cache
 from itertools import islice
@@ -16,7 +17,7 @@ from queue import Empty, Full, Queue
 from urllib.parse import parse_qs, urlparse
 
 try:
-    from .inventory import BATCH_SIZE, InventoryStore, contained, strm_contents
+    from .inventory import BATCH_SIZE, LOOKUP_BATCH_SIZE, InventoryStore, contained, strm_contents
     from .generation_cache import movie_candidates, signature
     from .media_library import (
         Identity,
@@ -25,7 +26,7 @@ try:
         resolve_library_ids,
     )
 except ImportError:
-    from inventory import BATCH_SIZE, InventoryStore, contained, strm_contents
+    from inventory import BATCH_SIZE, LOOKUP_BATCH_SIZE, InventoryStore, contained, strm_contents
     from generation_cache import movie_candidates, signature
     from media_library import (
         Identity,
@@ -99,6 +100,9 @@ class Reconciliation:
             "generation_unchanged": 0,
             "generation_candidates": 0,
             "generation_deduped": 0,
+            "source_presence_requested": 0,
+            "source_presence_found": 0,
+            "source_presence_queries": 0,
         }
         self.roots = [
             settings.get("root_folder", "/VODS/Movies"),
@@ -242,13 +246,19 @@ class Reconciliation:
         # Refresh failures must never establish episode absence.
         try:
             roots = self.discovery_roots()
-            if roots or m3u:
+            if roots:
                 with self.measure("catalogue"):
-                    self.census(metadata=bool(roots))
+                    self.census(metadata=True)
             with self.measure("legacy_adoption"):
                 self.adopt(roots=roots)
             refreshed = False
             if m3u:
+                # Include sources adopted during initial discovery, and use the
+                # same exact validation/presence semantics on every M3U check.
+                for table in ('live', 'live_series'):
+                    self.store.db.execute(f'DELETE FROM {table}')
+                with self.measure('catalogue'):
+                    self.census(metadata=False)
                 with self.measure("m3u_tracked_show_check"):
                     refreshed = self.refresh_tracked_series()
             if refreshed:
@@ -274,7 +284,7 @@ class Reconciliation:
     def census(self, metadata=True):
         self.report["catalogue_modes"].append("metadata" if metadata else "sources")
         if not metadata:
-            return self.source_census()
+            return self.tracked_source_census()
         from apps.vod.models import (
             M3UEpisodeRelation,
             M3UMovieRelation,
@@ -410,6 +420,74 @@ class Reconciliation:
             if batch:
                 self._source_batch(batch)
         self.progress(f"Checked complete Dispatcharr sources: {self.census_count:,} rows")
+
+    def tracked_source_census(self):
+        """Prove presence for every managed source across the unfiltered catalogue.
+
+        Untracked sources cannot influence deletion of tracked files. Exact
+        account/provider lookups use Dispatcharr's composite unique indices and
+        stay independent of generation batches, account activity and categories.
+        All lookups must finish before any M3U absence decision is actionable.
+        """
+        from apps.vod.models import M3UMovieRelation, M3UEpisodeRelation, M3USeriesRelation
+
+        self.progress('Checking every tracked Dispatcharr source')
+        self.census_count = 0
+        cursor = self.store.db.execute('SELECT DISTINCT source FROM sources ORDER BY source')
+        while True:
+            sources = cursor.fetchmany(LOOKUP_BATCH_SIZE)
+            if not sources:
+                break
+            groups = defaultdict(dict)
+            for (source,) in sources:
+                try:
+                    value = json.loads(source)
+                    if (not isinstance(value, list) or len(value) != 3
+                            or value[0] not in ('movie', 'episode')
+                            or not isinstance(value[1], str) or not value[1].isdigit()
+                            or not isinstance(value[2], str) or not value[2]):
+                        raise ValueError('Unsupported tracked source identity')
+                    kind, account, stream = value
+                    groups[(kind, int(account))].setdefault(stream, []).append(source)
+                except (ValueError, TypeError):
+                    raise ValueError('Unsupported tracked source identity') from None
+            self.report['source_presence_requested'] += len(sources)
+            for (kind, account), requested in groups.items():
+                model = M3UMovieRelation if kind == 'movie' else M3UEpisodeRelation
+                fields = ['m3u_account_id', 'stream_id']
+                if kind == 'episode':
+                    fields.append('episode__series_id')
+                rows = list(self.catalogue_rows(
+                    model.objects.filter(m3u_account_id=account, stream_id__in=list(requested))
+                    .values_list(*fields), f'catalogue_{kind}_read',
+                ))
+                self.report['source_presence_queries'] += 1
+                live_shows = set()
+                if kind == 'episode' and rows:
+                    # Episodes from a removed show must not establish presence.
+                    # Account-specific show membership uses the series PK on both
+                    # sides; a show present on another account does not suffice.
+                    for found_account, series in self.catalogue_rows(
+                        M3USeriesRelation.objects.filter(
+                            m3u_account_id=account, series_id__in=list({r[2] for r in rows}),
+                        ).values_list('m3u_account_id', 'series_id'), 'catalogue_series_read',
+                    ):
+                        live_shows.add((str(found_account), str(series)))
+                    self.report['source_presence_queries'] += 1
+                found = []
+                for row in rows:
+                    if str(row[0]) != str(account) or str(row[1]) not in requested:
+                        raise ValueError('Unexpected source lookup result')
+                    if kind == 'episode' and (str(row[0]), str(row[2])) not in live_shows:
+                        continue
+                    found.extend((source,) for source in requested[str(row[1])])
+                if found:
+                    self._source_batch(found)
+                self.report['source_presence_found'] += len(found)
+        self.progress(
+            f"Checked {self.report['source_presence_requested']:,} tracked sources; "
+            f"{self.report['source_presence_found']:,} present"
+        )
 
     def _source_batch(self, batch, series=False):
         with self.measure("catalogue_sqlite_write", len(batch)), self.store.db:
