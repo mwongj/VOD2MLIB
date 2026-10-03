@@ -506,6 +506,28 @@ def test_incremental_batches_do_not_checkpoint_unprocessed_candidates(library):
     assert library.run(batch_size='1')['scanned'] == 0
 
 
+def test_incremental_relative_root_deletion_invalidates_cached_output(library, monkeypatch):
+    monkeypatch.chdir(library.tmp)
+    library.settings['root_folder'] = 'Movies'
+    rel = relation(media(1))
+    library.rows['movies'].append(rel)
+    assert library.run()['created_strm'] == 1
+    store = InventoryStore(library.tmp / 'state')
+    path = list(store.rows())[0]['path']
+    assert store.db.execute("select path from generation_entries where kind='movie'").fetchone()[0] == path
+    with store.db:
+        store.db.execute("UPDATE generation_entries SET path=?", (os.path.relpath(path),))
+        store.db.execute("DELETE FROM generation_state WHERE key='absolute_paths'")
+    store.close()
+    store = InventoryStore(library.tmp / 'state')
+    assert store.db.execute("select path from generation_entries where kind='movie'").fetchone()[0] == path
+    store.close()
+    library.rows['movies'].clear()
+    assert library.run('selective_cleanup', m3u_cleanup_enabled=True)['reconciliation']['deleted'] == 1
+    library.rows['movies'].append(rel)
+    assert library.run()['created_strm'] == 1
+
+
 def test_incremental_projection_crosses_lookup_and_write_batches(library):
     library.rows['movies'].extend(relation(media(n)) for n in range(1, BATCH_SIZE + 3))
     result = library.run(generate_nfo=False)

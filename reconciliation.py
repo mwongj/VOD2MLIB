@@ -796,6 +796,7 @@ class Reconciliation:
                 )
 
     def cache_complete(self, kind, key, value, path):
+        path = os.path.abspath(path) if path else ''
         if threading.get_ident() == self.action_thread and self.cache_queue.full():
             self.drain()
         while not self.cancelled.is_set():

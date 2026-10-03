@@ -89,7 +89,7 @@ def movie_candidates(rec, query, settings):
                     settings.get('append_tmdb_id_to_folder', False),
                     settings.get('tmdb_tag_format') or 'plex',
                 )
-                path = os.path.join(folder, name)
+                path = os.path.abspath(os.path.join(folder, name))
                 url = rec.plugin._build_proxy_url(
                     (settings.get('dispatcharr_url') or '').rstrip('/'), 'movie',
                     row[3], row[2], settings.get('omit_stream_id', False),

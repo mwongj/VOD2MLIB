@@ -22,7 +22,7 @@
 
 ---
 
-## Media-library reconciliation (1.19.0-rc.11)
+## Media-library reconciliation (1.19.0-rc.12)
 
 Optional integration with one Emby server prevents generated STRMs from duplicating real media. Integration is disabled by default. Configure the server URL and API key, enable integration, then use **List media libraries** to find names/IDs and enter the real-media libraries you want checked. Explicit library names or IDs are required; there is no all-libraries option. Leave generated VOD/STRM libraries out to avoid fetching and discarding their contents. Empty, missing or ambiguous selections stop actions even with the continue-on-server-failure policy. Existing installations and scheduled snapshots must be updated with explicit names or IDs. Names are resolved on every run (case-insensitive exact matching), so a recreated library with the same name uses its new ID. Duplicate names require an ID. STRM-only, remote and virtual Emby entries do not count as owned; a movie with both a real file and a STRM does.
 

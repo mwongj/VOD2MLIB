@@ -133,6 +133,24 @@ class InventoryStore:
             "CREATE TEMP TABLE catalogue(uuid TEXT, stream TEXT, identity TEXT, source TEXT, season INTEGER, episode INTEGER)"
         )
         self.db.execute("CREATE INDEX temp.catalogue_uuid ON catalogue(uuid,stream)")
+        if not self.db.execute(
+            "SELECT 1 FROM generation_state WHERE key='absolute_paths'",
+        ).fetchone():
+            # One-time compatibility for decisions written before path normalization.
+            cursor = self.db.execute("SELECT kind,source,path FROM generation_entries WHERE path<>''")
+            while True:
+                rows = cursor.fetchmany(BATCH_SIZE)
+                if not rows:
+                    break
+                updates = [(os.path.abspath(path), kind, source) for kind, source, path in rows
+                           if not os.path.isabs(path)]
+                if updates:
+                    with self.db:
+                        self.db.executemany(
+                            'UPDATE generation_entries SET path=? WHERE kind=? AND source=?', updates,
+                        )
+            with self.db:
+                self.db.execute("INSERT INTO generation_state VALUES ('absolute_paths','1')")
 
     def close(self):
         self.db.close()
