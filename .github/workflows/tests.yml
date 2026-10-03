@@ -1,4 +1,4 @@
-ï»¿name: Plugin tests
+name: Plugin tests
 on: [push, pull_request]
 permissions:
   contents: read
