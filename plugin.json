@@ -613,27 +613,39 @@
     {
       "id": "rebuild_inventory",
       "label": "[LIBRARY] Rebuild / discover inventory",
-      "description": "Reconcile external filesystem changes and discover recognizable generated STRMs. Resets generation decisions so the next generation rechecks all eligible output, including missing files. Preserves ownership and NFO hashes; deletes no output files. Unverified files are preserved and reported."
+      "description": "Rediscover STRMs; reset decisions. Deletes no files.",
+      "button_label": "Rebuild",
+      "button_variant": "outline",
+      "button_color": "blue"
     },
     {
       "id": "list_media_libraries",
       "label": "List media libraries",
-      "description": "List Emby library names and IDs."
+      "description": "List Emby library names and IDs.",
+      "button_label": "List",
+      "button_variant": "outline",
+      "button_color": "blue"
     },
     {
       "id": "preview_cleanup",
       "label": "Preview selective cleanup",
-      "description": "Check complete catalogues and preview verified removals and NFO-only archives without changing output files."
+      "description": "Preview removals and NFO archives; changes no files.",
+      "button_label": "Preview",
+      "button_variant": "outline",
+      "button_color": "blue"
     },
     {
       "id": "selective_cleanup",
       "label": "Run selective cleanup",
-      "description": "Apply configured cleanup: remove verified duplicate/absent STRMs and archive filter- or ownership-excluded NFO-only folders."
+      "description": "Apply filters and enabled ownership/source cleanup.",
+      "button_label": "Clean up",
+      "button_variant": "filled",
+      "button_color": "orange"
     },
     {
       "id": "scan_all_vods",
       "label": "[LIBRARY] Catalogue snapshot",
-      "description": "Count unique Movies and Series in the Dispatcharr database. Read-only.",
+      "description": "Count native movie/series eligibility. Read-only.",
       "button_label": "Scan",
       "button_variant": "outline",
       "button_color": "blue"
@@ -641,7 +653,7 @@
     {
       "id": "generate_movies",
       "label": "[GENERATE] Movies",
-      "description": "Remove verified STRMs and archive NFO-only folders failing movie filters, then generate per Batch Size.",
+      "description": "Apply movie filters, then generate up to Batch Size.",
       "button_label": "Generate",
       "button_variant": "filled",
       "button_color": "green"
@@ -649,7 +661,7 @@
     {
       "id": "generate_series",
       "label": "[GENERATE] Series",
-      "description": "Remove verified STRMs and archive NFO-only folders failing series filters, then generate episode files.",
+      "description": "Apply series filters, then generate episode files.",
       "button_label": "Generate",
       "button_variant": "filled",
       "button_color": "green"
@@ -657,7 +669,7 @@
     {
       "id": "rescan_all",
       "label": "[GENERATE] Full rescan",
-      "description": "Apply current filters to existing output, then rescan Movies and Series.",
+      "description": "Apply filters, then rescan movies and series.",
       "button_label": "Rescan all",
       "button_variant": "filled",
       "button_color": "teal",
@@ -678,7 +690,7 @@
     {
       "id": "schedule_test_fire",
       "label": "[SCHEDULE] Test fire now",
-      "description": "Fire the scheduled task immediately. Verifies the cron pipeline.",
+      "description": "Run the saved scheduled action now.",
       "button_label": "Test fire",
       "button_variant": "outline",
       "button_color": "blue",
@@ -691,7 +703,7 @@
     {
       "id": "cleanup_movies",
       "label": "[⚠ DANGER] Clean up Movies",
-      "description": "Delete verified generated STRMs inside this root; NFO deletion follows Deletion scope. Unverified and edited files are preserved.",
+      "description": "Delete verified movie output per Deletion scope.",
       "button_label": "Clean up",
       "button_variant": "filled",
       "button_color": "red",
@@ -704,7 +716,7 @@
     {
       "id": "cleanup_series",
       "label": "[⚠ DANGER] Clean up Series",
-      "description": "Delete verified generated STRMs inside this root; NFO deletion follows Deletion scope. Unverified and edited files are preserved.",
+      "description": "Delete verified series output per Deletion scope.",
       "button_label": "Clean up",
       "button_variant": "filled",
       "button_color": "red",
@@ -717,12 +729,18 @@
     {
       "id": "action_status",
       "label": "[ACTION] Status",
-      "description": "Show the running background action or its final result."
+      "description": "Show the running action or its final result.",
+      "button_label": "Status",
+      "button_variant": "outline",
+      "button_color": "blue"
     },
     {
       "id": "stop_action",
       "label": "[ACTION] Stop running action",
-      "description": "Stop this plugin action and its workers; completed file changes remain."
+      "description": "Stop workers; keep completed file changes.",
+      "button_label": "Stop",
+      "button_variant": "filled",
+      "button_color": "red"
     }
   ]
 }

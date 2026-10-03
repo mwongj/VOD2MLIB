@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Keep action descriptions and button labels compact so buttons follow the existing right-aligned layout.
+
 - Extend NFO-only archival to enabled Emby ownership cleanup for movies and whole-show mode. Passing-filter titles such as A Different World can otherwise retain an empty VOD duplicate after owned STRMs are removed. Match existing cleanup scope/timing and provider-ID protections, preserve episode-mode folders, and report ownership archives separately in preview, results and telemetry.
 
 - Active metadata filters archive confirmed rejected NFO-only movie/series folders, including legacy or Emby-written metadata, outside output roots with a recovery manifest. Archives preserve metadata; STRMs, symlinks, unrelated files and passing sources protect folders.
