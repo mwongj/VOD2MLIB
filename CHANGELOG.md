@@ -15,7 +15,7 @@
 - Enable Auto-Rescan controls scheduling; Save validates and updates cron/timezone or disables the trigger. Apply and Unschedule actions are removed.
 - Existing schedules retain their enabled state; new installations default off. Legacy payload snapshots are cleared and disabled queued ticks are skipped.
 - Plugin-owned Django signals implement Save behavior without changing Dispatcharr source.
-- README reviewed against the fork's category, reconciliation, filtering, performance, and scheduling commits; installation links, architecture, tests, and cleanup behavior corrected.
+- README reviewed against the category, reconciliation, filtering, performance, and scheduling commits; installation links, architecture, tests, and cleanup behavior corrected.
 
 ## v1.20.0 — database-only filters and managed-output cleanup
 
@@ -23,7 +23,7 @@
 - Generation applies current filters to existing managed output before creation batching, with edited/unverified/shared-file protections.
 - Dispatcharr models are the only VOD metadata/episode source; provider fetches and native importer/freshness writes are removed.
 - Finer timing telemetry, configurable series concurrency, incremental signatures, bounded parallel STRM removal, and serialized durable inventory finalization.
-- Stable mwongj fork identity and documentation links.
+- Preserve plugin identity and documentation links across upgrades.
 
 ## v1.19.0 — Emby reconciliation, inventory, and background actions
 
