@@ -1,7 +1,7 @@
 """
 VOD to Media Library — Dispatcharr VOD .strm Generator Plugin
 (slug: vod2mlib)
-v1.20.1 — independent movie and series metadata filters.
+v1.20.2 — metadata filters and safe NFO-only cleanup.
 
 MIT License
 Copyright (c) 2025-2026 shedunraid (original author)
@@ -41,7 +41,7 @@ class Plugin:
     """Generate .strm files for VOD movies from Dispatcharr."""
 
     name = "VOD to Media Library (mwongj fork)"
-    version = "1.20.1"
+    version = "1.20.2"
     help_url = "https://github.com/mwongj/VOD2MLIB#readme"
     description = (
         "Convert Dispatcharr VODs into media-server-friendly .strm files, with "
