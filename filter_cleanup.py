@@ -57,6 +57,8 @@ def cleanup(rec, action):
     try:
         with rec.measure('filter_metadata_read'):
             while True:
+                if getattr(rec, 'cancelled', None) and rec.cancelled.is_set():
+                    raise RuntimeError('Action cancelled')
                 sources = cursor.fetchmany(LOOKUP_BATCH_SIZE)
                 if not sources:
                     break
@@ -79,33 +81,60 @@ def cleanup(rec, action):
                     model = M3UMovieRelation if kind == 'movie' else M3UEpisodeRelation
                     prefix = 'movie' if kind == 'movie' else 'episode__series'
                     fields = ['stream_id', f'{prefix}__rating', f'{prefix}__year']
-                    if kind == 'series':
-                        fields.append(f'{prefix}__genre')
+                    fields.append(f'{prefix}__genre')
                     fields.append(f'{prefix}__name')
+                    if hasattr(rec, 'preparation') and kind == 'series':
+                        fields.append('episode__series_id')
                     decisions = defaultdict(list)
                     query = model.objects.filter(m3u_account_id=account, stream_id__in=list(requested))
                     for row in query.values_list(*fields).iterator(chunk_size=LOOKUP_BATCH_SIZE):
                         stream = str(row[0])
                         if stream not in requested:
                             raise ValueError('Unexpected filter metadata result')
-                        decisions[stream].append(evaluate_metadata(rules[kind], kind, row[1:])[0])
+                        if hasattr(rec, 'preparation'):
+                            if kind == 'movie':
+                                decision = rec.preparation.verified_decision(kind, account, stream, row[1:])
+                            else:
+                                from apps.vod.models import M3USeriesRelation
+                                parents = M3USeriesRelation.objects.filter(m3u_account_id=account,
+                                                                          series_id=row[-1])
+                                decision, found = 0, False
+                                for parent in parents.iterator(chunk_size=LOOKUP_BATCH_SIZE):
+                                    found = True
+                                    outcome = rec.preparation.verified_decision(kind, account,
+                                                          parent.external_series_id, row[1:-1])
+                                    if outcome is None:
+                                        decision = None
+                                        break
+                                    decision = max(decision, outcome)
+                                if not found: decision = None
+                            decisions[stream].append(decision)
+                        else:
+                            decisions[stream].append(evaluate_metadata(rules[kind], kind, row[1:])[0])
                     with db:
                         db.executemany('INSERT OR REPLACE INTO filter_sources VALUES (?,?)',
-                                       [(source, int(any(passed)))
+                                       [(source, (2 if None in passed else int(any(passed))))
                                         for stream, passed in decisions.items()
                                         for source in requested[stream]])
     except Exception as error:
         raise FilterCleanupError(
             f'Filter metadata lookup failed; no filter removals applied ({type(error).__name__})'
         ) from error
+    if hasattr(rec, 'preparation'):
+        rec.report['enrichment']['protected'] = db.execute(
+            f'SELECT COUNT(*) FROM files f WHERE f.kind IN ({placeholders}) '
+            'AND EXISTS (SELECT 1 FROM sources s LEFT JOIN filter_sources d ON d.source=s.source '
+            'WHERE s.path=f.path AND (d.passed IS NULL OR d.passed=2))', kinds).fetchone()[0]
     sql = (
         f'SELECT f.* FROM files f WHERE f.kind IN ({placeholders}) '
         'AND EXISTS (SELECT 1 FROM sources s WHERE s.path=f.path) '
         'AND NOT EXISTS (SELECT 1 FROM sources s LEFT JOIN filter_sources d ON d.source=s.source '
-        'WHERE s.path=f.path AND (d.passed IS NULL OR d.passed=1)) '
+        'WHERE s.path=f.path AND (d.passed IS NULL OR d.passed!=0)) '
         'AND f.path>? ORDER BY f.path LIMIT ?')
     dry_run = action == 'preview_cleanup'
     def remove_one(row):
+        if getattr(rec, 'cancelled', None) and rec.cancelled.is_set():
+            raise RuntimeError('Action cancelled')
         with rec.measure('cleanup_strm_io', 1, worker=True):
             was_existing = os.path.lexists(row['path'])
             try:

@@ -1,6 +1,6 @@
 {
   "name": "VOD to Media Library (mwongj fork)",
-  "version": "1.20.1",
+  "version": "1.21.0-rc.1",
   "description": "VOD → media library bridge. Generates .strm + NFO files from Dispatcharr's VOD catalogue, with optional cron-driven auto-rescan that picks up newly-added episodes.",
   "author": "mwongj",
   "license": "MIT",
@@ -190,7 +190,7 @@
           "label": "All series (may time out — use the schedule)"
         }
       ],
-      "help_text": "Number of series to process per run using episodes stored in Dispatcharr. Actions run in the background. For automatic full rescans, select Full rescan, enable Auto-Rescan, and Save."
+      "help_text": "Number of series to generate per run. Missing selected episode lists are conditionally populated through Dispatcharr. Actions run in the background. For automatic full rescans, select Full rescan, enable Auto-Rescan, and Save."
     },
     {
       "id": "series_workers",
@@ -237,7 +237,7 @@
       "label": "Refresh Existing Series (rescan-friendly)",
       "type": "boolean",
       "default": false,
-      "help_text": "Re-evaluate existing series using only metadata and episodes already stored in Dispatcharr. Include newly stored episodes and refresh changed managed STRM/NFO output while preserving edited files. No provider requests or native metadata updates occur. Off skips already-generated series; On rechecks them. Full rescan forces this On. Refresh or fetch episode data in Dispatcharr before generating if its database is incomplete or stale."
+      "help_text": "Recheck existing series and changed managed output, preserving edited files. Enabled filter metadata and missing selected episode lists are conditionally fetched through Dispatcharr. Full rescan forces this On but does not force provider refetches. Successful responses never expire; newly added provider episodes appear after Dispatcharr updates its catalogue."
     },
     {
       "id": "nest_series_by_category",
@@ -482,7 +482,7 @@
       "id": "_section_metadata_filters",
       "label": "[METADATA FILTERS]",
       "type": "info",
-      "description": "Filter movies and series independently by score, year, and title regex, and series by genre, using Dispatcharr metadata. Blank rules are disabled; unknown metadata is kept by default. The next generation run removes verified generated STRMs and NFOs that fail current filters, while preserving edited files. Scheduled runs use current saved filters automatically."
+      "description": "Filter movies and series independently by score, year, and title regex, and genre, using Dispatcharr metadata, conditionally enriched before filtering. Blank rules are disabled; unknown metadata is kept by default. The next generation run removes verified generated STRMs and NFOs that fail current filters, while preserving edited files. Scheduled runs use current saved filters automatically."
     },
     {
       "id": "movie_minimum_score",
@@ -520,7 +520,7 @@
           "label": "Reject unknowns"
         }
       ],
-      "help_text": "Applies only to enabled metadata rules. Uses Dispatcharr model metadata."
+      "help_text": "Applies only to enabled metadata rules. Missing required fields are fetched first. Verified provider omissions follow this policy; failed or unverified fetches defer output."
     },
     {
       "id": "movie_title_include",
@@ -572,7 +572,7 @@
           "label": "Reject unknowns"
         }
       ],
-      "help_text": "Applies only to enabled metadata rules. Uses Dispatcharr model metadata."
+      "help_text": "Applies only to enabled metadata rules. Missing required fields are fetched first. Verified provider omissions follow this policy; failed or unverified fetches defer output."
     },
     {
       "id": "series_title_include",
@@ -587,6 +587,20 @@
       "type": "string",
       "default": "",
       "help_text": "Case-insensitive regular expression searched in the original Dispatcharr title before cleanup. Use ^\\s*(AF|AR)\\s*[-:|]\\s* for provider prefixes or ^\\s*\\[(AF|AR)\\]\\s* for bracketed tags. Include requires a match; exclude rejects a match and wins over include. Blank disables."
+    },
+    {
+      "id": "movie_genre_include",
+      "label": "Genre Include (Movie)",
+      "type": "string",
+      "default": "",
+      "help_text": "Comma-separated complete genre names, case-insensitive. Compound names remain intact. Any include qualifies; any exclude rejects. Blank disables."
+    },
+    {
+      "id": "movie_genre_exclude",
+      "label": "Genre Exclude (Movie)",
+      "type": "string",
+      "default": "",
+      "help_text": "Comma-separated complete genre names, case-insensitive. Compound names remain intact. Any include qualifies; any exclude rejects. Blank disables."
     },
     {
       "id": "series_genre_include",
@@ -617,17 +631,17 @@
     {
       "id": "preview_cleanup",
       "label": "Preview selective cleanup",
-      "description": "Check complete catalogues and log verified cleanup candidates without deleting output files."
+      "description": "Check complete catalogues and log verified cleanup candidates without deleting output files. Enabled filter metadata may be fetched and persisted in Dispatcharr."
     },
     {
       "id": "selective_cleanup",
       "label": "Run selective cleanup",
-      "description": "Delete verified duplicates and confirmed M3U removals according to configured settings."
+      "description": "Prepare enabled filter metadata, then delete verified filter rejections, duplicates and confirmed M3U removals according to configured settings."
     },
     {
       "id": "scan_all_vods",
       "label": "[LIBRARY] Catalogue snapshot",
-      "description": "Count unique Movies and Series in the Dispatcharr database. Read-only.",
+      "description": "Enrich missing enabled filter metadata and report final unique movie/series counts plus unresolved items. May update native metadata and incidental episodes; generates, adopts and deletes no output.",
       "button_label": "Scan",
       "button_variant": "outline",
       "button_color": "blue"
@@ -635,7 +649,7 @@
     {
       "id": "generate_movies",
       "label": "[GENERATE] Movies",
-      "description": "Remove verified output failing current movie filters, then generate per Batch Size.",
+      "description": "Enrich missing enabled filter metadata, remove verified rejected output, then generate per Batch Size. Failed enrichment protects output.",
       "button_label": "Generate",
       "button_variant": "filled",
       "button_color": "green"
@@ -643,7 +657,7 @@
     {
       "id": "generate_series",
       "label": "[GENERATE] Series",
-      "description": "Remove verified output failing current series filters, then generate episode files.",
+      "description": "Enrich missing enabled filter metadata, remove verified rejected output, then populate missing selected episode lists and generate.",
       "button_label": "Generate",
       "button_variant": "filled",
       "button_color": "green"
@@ -658,7 +672,7 @@
       "confirm": {
         "required": true,
         "title": "Run full rescan now?",
-        "message": "Full rescan walks every Movie and every Series, re-fetching episode lists from the M3U source and writing any missing files. On large catalogues this can take many minutes. The cron schedule already runs this action nightly — only click here for an immediate refresh."
+        "message": "Prepare movie and series filters, then refresh managed output within saved batch limits. Only missing required metadata or selected episode lists are fetched. Successful responses are reused; this does not detect new provider episodes. Large catalogues can take many minutes."
       }
     },
     {

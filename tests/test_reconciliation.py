@@ -626,7 +626,7 @@ def test_schema_persistence_missing_files_and_rollback(tmp_path):
     file.write_text("url")
     identity = Identity("movie", "A", 2000, "1")
     store.record(str(file), identity, "source")
-    assert store.db.execute("PRAGMA user_version").fetchone()[0] == 3
+    assert store.db.execute("PRAGMA user_version").fetchone()[0] == 4
     store.close()
     store = InventoryStore(tmp_path / "state")
     assert list(store.rows())[0]["tmdb"] == "1"
@@ -1498,7 +1498,7 @@ def test_discovery_markers_survive_schema_one_upgrade(tmp_path):
     store.db.execute("DROP TABLE discovery_roots")
     store.db.execute("PRAGMA user_version=1"); store.close()
     store = InventoryStore(tmp_path / "state")
-    assert store.db.execute("PRAGMA user_version").fetchone()[0] == 3
+    assert store.db.execute("PRAGMA user_version").fetchone()[0] == 4
     assert [tuple(row) for row in store.rows()] == before
     store.mark_discovered("root", "context"); store.close()
     store = InventoryStore(tmp_path / "state")
@@ -1680,7 +1680,7 @@ def test_failed_lean_query_never_establishes_m3u_absence(library, monkeypatch):
     monkeypatch.setattr(Query, "iterator", fail)
     result = library.run("selective_cleanup", m3u_cleanup_enabled=True)
     assert result["reconciliation"]["deleted"] == 0
-    assert result["reconciliation"]["warnings"] and strm.exists()
+    assert result["status"] == "error" and strm.exists()
 
 
 def test_cleanup_uses_database_source_census_once(library, monkeypatch):

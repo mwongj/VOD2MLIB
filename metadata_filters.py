@@ -1,4 +1,4 @@
-"""Independent, model-only metadata rules and bounded catalogue projections."""
+"""Independent ordered metadata rules and bounded catalogue projections."""
 
 import math
 import re
@@ -115,8 +115,8 @@ def configuration(settings):
         if policy not in ('keep', 'reject'):
             raise ValueError(f'{kind}_missing_metadata must be keep or reject')
         rules[kind] = Rules(**values, missing=policy,
-            include=genre_names(settings.get('series_genre_include')) if kind == 'series' else frozenset(),
-            exclude=genre_names(settings.get('series_genre_exclude')) if kind == 'series' else frozenset(),
+            include=genre_names(settings.get(f'{kind}_genre_include')),
+            exclude=genre_names(settings.get(f'{kind}_genre_exclude')),
             title_include=title_pattern(settings, f'{kind}_title_include'),
             title_exclude=title_pattern(settings, f'{kind}_title_exclude'))
     return rules
@@ -126,8 +126,8 @@ SECTION = dict(
     id='_section_metadata_filters',
     label='[METADATA FILTERS]',
     type='info',
-    description='Filter movies and series independently by score, year, and title regex, and series by genre, '
-                'using Dispatcharr metadata. Blank rules are disabled; unknown metadata is kept '
+    description='Filter movies and series independently by score, year, and title regex, and genre, '
+                'using Dispatcharr metadata, conditionally enriched before filtering. Blank rules are disabled; unknown metadata is kept '
                 'by default. The next generation run removes verified generated STRMs and NFOs '
                 'that fail current filters, while preserving edited files. Scheduled runs use '
                 'current saved filters automatically.',
@@ -144,29 +144,30 @@ for _kind in ('movie', 'series'):
                            type='string', default='', help_text=_help))
     FIELDS.append(dict(id=f'{_kind}_missing_metadata', label=f'Missing Metadata ({_kind.title()})',
         type='select', default='keep', options=[{'value': 'keep', 'label': 'Keep unknowns'},
-        {'value': 'reject', 'label': 'Reject unknowns'}], help_text='Applies only to enabled metadata rules. Uses Dispatcharr model metadata.'))
+        {'value': 'reject', 'label': 'Reject unknowns'}], help_text='Applies only to enabled metadata rules. Missing required fields are fetched first. Verified provider omissions follow this policy; failed or unverified fetches defer output.'))
     for _suffix in ('include', 'exclude'):
         FIELDS.append(dict(id=f'{_kind}_title_{_suffix}', label=f'Title {_suffix.title()} Regex ({_kind.title()})',
             type='string', default='',
             help_text=r'Case-insensitive regular expression searched in the original Dispatcharr title before cleanup. '
                       r'Use ^\s*(AF|AR)\s*[-:|]\s* for provider prefixes or ^\s*\[(AF|AR)\]\s* for bracketed tags. '
                       r'Include requires a match; exclude rejects a match and wins over include. Blank disables.'))
-for _suffix in ('include', 'exclude'):
-    FIELDS.append(dict(id=f'series_genre_{_suffix}', label=f'Genre {_suffix.title()} (Series)',
-        type='string', default='', help_text='Comma-separated complete genre names, case-insensitive. Compound names remain intact. Any include qualifies; any exclude rejects. Blank disables.'))
+for _kind in ('movie', 'series'):
+    for _suffix in ('include', 'exclude'):
+        FIELDS.append(dict(id=f'{_kind}_genre_{_suffix}', label=f'Genre {_suffix.title()} ({_kind.title()})',
+            type='string', default='', help_text='Comma-separated complete genre names, case-insensitive. Compound names remain intact. Any include qualifies; any exclude rejects. Blank disables.'))
 
 SETTING_KEYS = tuple(field['id'] for field in FIELDS)
 
 
 def metadata_fields(kind):
     fields = [f'{kind}__rating', f'{kind}__year']
-    if kind == 'series': fields.append('series__genre')
+    fields.append(f'{kind}__genre')
     fields.append(f'{kind}__name')
     return fields
 
 
 def evaluate_metadata(rules, kind, values):
-    return rules.evaluate(values[0], values[1], values[2] if kind == 'series' else None, values[-1])
+    return rules.evaluate(values[0], values[1], values[2], values[-1])
 
 
 def passing_relations(query, kind, rules):
@@ -183,7 +184,9 @@ def passing_relations(query, kind, rules):
                 if pk in models: yield models[pk]
 
 
-def catalogue_counts(query, kind, rules):
+def catalogue_counts(query, kind, rules, preparation=None):
+    if preparation is not None:
+        return preparation.counts(query, kind)
     counts = dict(eligible=0, passing=0, rejected_score=0, rejected_year=0,
                   rejected_genre=0, rejected_title=0, retained_unknown=0)
     # Unique model IDs, not provider relations. SQL distinct bounds Python memory.

@@ -47,13 +47,15 @@ def test_actions_never_fetch_providers_or_mutate_native_freshness(library, monke
     assert not any(key.startswith('provider_') for key in result['reconciliation']['timings'])
 
 
-def test_missing_database_episodes_do_not_trigger_provider_fallback(library, monkeypatch):
+def test_missing_episode_enrichment_failure_defers_output(library, monkeypatch):
     attempts = forbid_provider(monkeypatch)
     show = relation(media(10), 'series')
     show.custom_properties = {}
     library.rows['series'].append(show)
     result = library.run('generate_series', refresh_existing=True)
     assert result['status'] == 'ok' and result['episodes_created'] == 0
+    # This fake account has no provider credentials; preparation fails safely.
+    assert result['reconciliation']['enrichment']['deferred'] == 1
     assert not attempts and not list(Path(library.settings['series_root_folder']).rglob('*.strm'))
 
 

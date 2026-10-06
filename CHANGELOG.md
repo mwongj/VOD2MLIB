@@ -1,5 +1,13 @@
 # Changelog
 
+## v1.21.0-rc.1 ? Verified Dispatcharr enrichment before filtering
+
+- Enrich only missing metadata required by enabled year, score and genre filters, before title rules or generation. Add independent movie genre include/exclude settings.
+- Cache provider responses durably by account/provider source, replay native helpers transactionally and verify metadata and episode mappings. Successful evidence has no TTL; failed enrichment defers generation and protects filter output.
+- Populate missing selected series episode lists before workers, preserving batching and stable managed episode paths. Existing provider episodes are not automatically refreshed for future additions.
+- Supervise and lock catalogue snapshots; previews and snapshots can update native metadata, incidental episodes and fetch state without deleting output files. Inventory rebuild and explicit root cleanup initiate no enrichment.
+- Pace requests including authentication, honor retry cooldowns, and report cache reuse, verified omissions and deferred sources. Cover pinned minimum/current Dispatcharr helpers with real Django transaction compatibility checks.
+
 ## v1.18.0 — NFO titles your media server can actually match
 
 Everything here came out of the Dispatcharr Discord thread. No breaking changes, and no folder names change.

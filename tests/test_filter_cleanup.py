@@ -76,7 +76,7 @@ def test_unknown_metadata_policy_and_missing_source_are_distinct(library):
     library.rows['movies'].append(relation(media(1, year=None)))
     library.run()
     assert library.run(movie_earliest_year='2000')['reconciliation']['filter_deleted'] == 0
-    assert library.run(movie_earliest_year='2000', movie_missing_metadata='reject')['reconciliation']['filter_deleted'] == 1
+    assert library.run(movie_earliest_year='2000', movie_missing_metadata='reject')['reconciliation']['filter_deleted'] == 0
     library.rows['movies'][:] = [relation(media(2, year=1914))]
     library.run()
     path = next(Path(library.settings['root_folder']).rglob('*.strm'))
