@@ -8,9 +8,11 @@ from concurrent.futures import ThreadPoolExecutor
 try:
     from .inventory import LOOKUP_BATCH_SIZE, remove_strm
     from .metadata_filters import configuration, evaluate_metadata
+    from .orphan_nfo import plan as nfo_plan, archive as archive_nfos
 except ImportError:
     from inventory import LOOKUP_BATCH_SIZE, remove_strm
     from metadata_filters import configuration, evaluate_metadata
+    from orphan_nfo import plan as nfo_plan, archive as archive_nfos
 
 
 class FilterCleanupError(RuntimeError):
@@ -55,6 +57,7 @@ def cleanup(rec, action):
     # Complete all bounded native lookups before allowing any filter deletion.
     # Missing/ambiguous source mappings stay unknown and protect shared output.
     try:
+        orphan_candidates = nfo_plan(rec, kinds, rules)
         with rec.measure('filter_metadata_read'):
             while True:
                 if getattr(rec, 'cancelled', None) and rec.cancelled.is_set():
@@ -132,6 +135,7 @@ def cleanup(rec, action):
         'WHERE s.path=f.path AND (d.passed IS NULL OR d.passed!=0)) '
         'AND f.path>? ORDER BY f.path LIMIT ?')
     dry_run = action == 'preview_cleanup'
+    rec.filter_preview_removals = {}
     def remove_one(row):
         if getattr(rec, 'cancelled', None) and rec.cancelled.is_set():
             raise RuntimeError('Action cancelled')
@@ -160,6 +164,8 @@ def cleanup(rec, action):
                             raise error
                         outcome = rec.store.finish_delete(row, rec.roots, outcome, include_nfo=True,
                                                           dry_run=dry_run, stats=rec.report)
+                        if dry_run and outcome in ('candidate', 'missing'):
+                            rec.filter_preview_removals[row['path']] = json.loads(row['nfos'])
                         rec.report[outcome] += 1
                         counter = {'candidate': 'filter_candidates', 'deleted': 'filter_deleted',
                                    'preserved': 'filter_preserved', 'missing': 'filter_missing'}[outcome]
@@ -180,3 +186,4 @@ def cleanup(rec, action):
                 f"{rec.report['filter_deleted']:,} removed, "
                 f"{rec.report['filter_preserved']:,} protected; "
                 f"{rec.report['filter_errors']:,} errors")
+    archive_nfos(rec, orphan_candidates, dry_run)

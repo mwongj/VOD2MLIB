@@ -1,19 +1,19 @@
 {
-  "name": "VOD to Media Library (mwongj fork)",
+  "name": "VOD to Media Library",
   "version": "1.21.0-rc.1",
   "description": "VOD → media library bridge. Generates .strm + NFO files from Dispatcharr's VOD catalogue, with optional cron-driven auto-rescan that picks up newly-added episodes.",
-  "author": "mwongj",
+  "author": "R3XCHRIS",
   "license": "MIT",
   "min_dispatcharr_version": "v0.24.0",
-  "repo_url": "https://github.com/mwongj/VOD2MLIB",
-  "help_url": "https://github.com/mwongj/VOD2MLIB#readme",
+  "repo_url": "https://github.com/R3XCHRIS/VOD2MLIB",
+  "help_url": "https://github.com/R3XCHRIS/VOD2MLIB#readme",
   "discord_thread": "https://discord.com/channels/1340492560220684331/1503076618078261374",
   "fields": [
     {
       "id": "_about",
       "label": "About",
       "type": "info",
-      "description": "Workflow:\n  1. Configure paths below.\n  2. Actions → Scan → see catalogue totals.\n  3. Actions → Generate Movies / Generate Series (start with Batch Size 10).\n  4. (Optional) Turn ON Refresh Existing Series, enable Auto-Rescan, set cron, and Save for nightly auto-rescan.\n\nDocs: https://github.com/mwongj/VOD2MLIB"
+      "description": "Workflow:\n  1. Configure paths below.\n  2. Actions → Scan → see catalogue totals.\n  3. Actions → Generate Movies / Generate Series (start with Batch Size 10).\n  4. (Optional) Turn ON Refresh Existing Series, enable Auto-Rescan, set cron, and Save for nightly auto-rescan.\n\nDocs: https://github.com/R3XCHRIS/VOD2MLIB"
     },
     {
       "id": "_section_paths",
@@ -42,6 +42,33 @@
       "default": "",
       "placeholder": "http://192.168.1.10:9191",
       "help_text": "Required. The externally-reachable URL of your Dispatcharr instance — this gets baked into every .strm file, so it must resolve from wherever your media server runs. localhost works ONLY if the media server is on the same host with shared network namespace; otherwise use a routable LAN IP/hostname. Don't forget to click Save."
+    },
+    {
+      "id": "_section_nfo",
+      "label": "[NFO METADATA]",
+      "type": "info",
+      "description": "Choose who writes metadata: this plugin or Emby. Disable both generation toggles if Emby manages metadata and saves NFOs. Emby integration checks real-media ownership independently. Filters and enabled Emby ownership cleanup archive excluded NFO-only folders even when generation is off or Deletion scope is STRMs only."
+    },
+    {
+      "id": "generate_nfo",
+      "label": "Generate Movie NFO Files",
+      "type": "boolean",
+      "default": true,
+      "help_text": "Write Dispatcharr metadata when the movie NFO is absent. Turn this off if Emby manages metadata and saves its own NFOs. Emby integration only checks library ownership; it does not configure metadata saving. Turning this off preserves existing NFOs. Filters and enabled Emby ownership cleanup archive excluded NFO-only folders independently of this toggle and Deletion scope."
+    },
+    {
+      "id": "generate_series_nfo",
+      "label": "Generate Series NFO Files",
+      "type": "boolean",
+      "default": true,
+      "help_text": "Write Dispatcharr metadata when tvshow.nfo or an episode NFO is absent. Turn this off if Emby manages metadata and saves its own NFOs. Existing NFOs are preserved during generation. Filters and enabled Emby ownership cleanup archive excluded NFO-only folders independently of this toggle and Deletion scope."
+    },
+    {
+      "id": "nfo_omit_title",
+      "label": "Omit <title> from NFO files",
+      "type": "boolean",
+      "default": false,
+      "help_text": "Leave the `<title>` element OUT of generated movie and tvshow NFO files. Jellyfin (and Emby) treat a `<title>` in the NFO as authoritative and will NOT override it from TMDB — so if your provider prefixes titles with tags like `4K-A+`, `EN-TOP` or `AMZ`, that junk becomes the displayed name. With this ON the plugin still writes the NFO (IDs, plot, genres, rating, poster) but omits the title, letting your media server take the clean title from TMDB via the `<tmdbid>` we already emit. OFF by default (unchanged behaviour). Note v1.18.0 also cleans provider junk out of the title, so try that first — this is the belt-and-braces option. Episode NFOs always keep their title (media servers match episodes by season/episode number)."
     },
     {
       "id": "_section_movies",
@@ -85,20 +112,6 @@
         }
       ],
       "help_text": "Number of movies to process in this run. Start small (10) to verify, then scale up."
-    },
-    {
-      "id": "generate_nfo",
-      "label": "Generate Movie NFO Files",
-      "type": "boolean",
-      "default": true,
-      "help_text": "Create .nfo metadata files alongside each movie .strm."
-    },
-    {
-      "id": "nfo_omit_title",
-      "label": "Omit <title> from NFO files",
-      "type": "boolean",
-      "default": false,
-      "help_text": "Leave the `<title>` element OUT of generated movie and tvshow NFO files. Jellyfin (and Emby) treat a `<title>` in the NFO as authoritative and will NOT override it from TMDB — so if your provider prefixes titles with tags like `4K-A+`, `EN-TOP` or `AMZ`, that junk becomes the displayed name. With this ON the plugin still writes the NFO (IDs, plot, genres, rating, poster) but omits the title, letting your media server take the clean title from TMDB via the `<tmdbid>` we already emit. OFF by default (unchanged behaviour). Note v1.18.0 also cleans provider junk out of the title, so try that first — this is the belt-and-braces option. Episode NFOs always keep their title (media servers match episodes by season/episode number)."
     },
     {
       "id": "nest_movies_by_category",
@@ -224,13 +237,6 @@
         }
       ],
       "help_text": "Concurrent series generation tasks using Dispatcharr database metadata. Default 3; increase after measuring database and storage performance. Movies continue using 3 workers."
-    },
-    {
-      "id": "generate_series_nfo",
-      "label": "Generate Series NFO Files",
-      "type": "boolean",
-      "default": true,
-      "help_text": "Create tvshow.nfo and per-episode .nfo metadata files."
     },
     {
       "id": "refresh_existing",
@@ -447,7 +453,7 @@
           "label": "STRMs and unedited generated NFOs"
         }
       ],
-      "help_text": "STRMs only preserves all NFO metadata. STRMs and unedited generated NFOs also removes NFOs whose recorded generated hashes still match. Edited or unverified files, artwork and subtitles are preserved. Applies to automatic, selective and Movies/Series cleanup actions."
+      "help_text": "For Emby/source-removal and explicit root cleanup, STRMs only preserves NFO metadata. Filters and enabled Emby ownership cleanup independently archive excluded NFO-only folders outside the library. STRMs and unedited generated NFOs also removes NFOs whose recorded generated hashes still match. Edited or unverified files, artwork and subtitles are preserved. Applies to automatic, selective and Movies/Series cleanup actions."
     },
     {
       "id": "action_timeout_minutes",
@@ -621,22 +627,34 @@
     {
       "id": "rebuild_inventory",
       "label": "[LIBRARY] Rebuild / discover inventory",
-      "description": "Reconcile external filesystem changes and discover recognizable generated STRMs. Resets generation decisions so the next generation rechecks all eligible output, including missing files. Preserves ownership and NFO hashes; deletes no output files. Unverified files are preserved and reported."
+      "description": "Rediscover STRMs; reset decisions. Deletes no files.",
+      "button_label": "Rebuild",
+      "button_variant": "outline",
+      "button_color": "blue"
     },
     {
       "id": "list_media_libraries",
       "label": "List media libraries",
-      "description": "List Emby library names and IDs."
+      "description": "List Emby library names and IDs.",
+      "button_label": "List",
+      "button_variant": "outline",
+      "button_color": "blue"
     },
     {
       "id": "preview_cleanup",
       "label": "Preview selective cleanup",
-      "description": "Check complete catalogues and log verified cleanup candidates without deleting output files. Enabled filter metadata may be fetched and persisted in Dispatcharr."
+      "description": "Check complete catalogues and log verified cleanup candidates without deleting output files. Enabled filter metadata may be fetched and persisted in Dispatcharr.",
+      "button_label": "Preview",
+      "button_variant": "outline",
+      "button_color": "blue"
     },
     {
       "id": "selective_cleanup",
       "label": "Run selective cleanup",
-      "description": "Prepare enabled filter metadata, then delete verified filter rejections, duplicates and confirmed M3U removals according to configured settings."
+      "description": "Prepare enabled filter metadata, then delete verified filter rejections, duplicates and confirmed M3U removals according to configured settings.",
+      "button_label": "Clean up",
+      "button_variant": "filled",
+      "button_color": "orange"
     },
     {
       "id": "scan_all_vods",
@@ -665,7 +683,7 @@
     {
       "id": "rescan_all",
       "label": "[GENERATE] Full rescan",
-      "description": "Apply current filters to existing output, then rescan Movies and Series.",
+      "description": "Apply filters, then rescan movies and series.",
       "button_label": "Rescan all",
       "button_variant": "filled",
       "button_color": "teal",
@@ -686,7 +704,7 @@
     {
       "id": "schedule_test_fire",
       "label": "[SCHEDULE] Test fire now",
-      "description": "Fire the scheduled task immediately. Verifies the cron pipeline.",
+      "description": "Run the saved scheduled action now.",
       "button_label": "Test fire",
       "button_variant": "outline",
       "button_color": "blue",
@@ -699,7 +717,7 @@
     {
       "id": "cleanup_movies",
       "label": "[⚠ DANGER] Clean up Movies",
-      "description": "Delete verified generated STRMs inside this root; NFO deletion follows Deletion scope. Unverified and edited files are preserved.",
+      "description": "Delete verified movie output per Deletion scope.",
       "button_label": "Clean up",
       "button_variant": "filled",
       "button_color": "red",
@@ -712,7 +730,7 @@
     {
       "id": "cleanup_series",
       "label": "[⚠ DANGER] Clean up Series",
-      "description": "Delete verified generated STRMs inside this root; NFO deletion follows Deletion scope. Unverified and edited files are preserved.",
+      "description": "Delete verified series output per Deletion scope.",
       "button_label": "Clean up",
       "button_variant": "filled",
       "button_color": "red",
@@ -725,12 +743,18 @@
     {
       "id": "action_status",
       "label": "[ACTION] Status",
-      "description": "Show the running background action or its final result."
+      "description": "Show the running action or its final result.",
+      "button_label": "Status",
+      "button_variant": "outline",
+      "button_color": "blue"
     },
     {
       "id": "stop_action",
       "label": "[ACTION] Stop running action",
-      "description": "Stop this plugin action and its workers; completed file changes remain."
+      "description": "Stop workers; keep completed file changes.",
+      "button_label": "Stop",
+      "button_variant": "filled",
+      "button_color": "red"
     }
   ]
 }

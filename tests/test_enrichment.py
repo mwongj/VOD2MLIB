@@ -325,3 +325,17 @@ def test_oversized_response_is_not_cached_as_success(library, provider, monkeypa
     evidence = store.db.execute('SELECT * FROM fetch_evidence').fetchone()
     assert evidence['response'] is None and evidence['response_state'] == 'failed'
     store.close()
+
+
+def test_failed_enrichment_protects_nfo_only_archive(library, provider):
+    obj = media(1)
+    library.rows['movies'].append(relation(obj))
+    library.run()
+    root = Path(library.settings['root_folder'])
+    for path in root.rglob('*.strm'): path.unlink()
+    before = {str(p): p.read_bytes() for p in root.rglob('*.nfo')}
+    obj.year = None
+    provider.fail = True
+    result = library.run('selective_cleanup', movie_earliest_year='2000', movie_missing_metadata='reject')
+    assert result['reconciliation']['filter_nfo_folders_archived'] == 0
+    assert before == {str(p): p.read_bytes() for p in root.rglob('*.nfo')}
