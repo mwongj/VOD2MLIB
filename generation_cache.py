@@ -48,7 +48,7 @@ def movie_key(row):
 
 def movie_candidates(rec, query, settings):
     fields = ('id', 'm3u_account_id', 'stream_id', 'movie__uuid', 'movie__name',
-              'movie__year', 'movie__tmdb_id', 'movie__imdb_id', 'category__name', 'movie__id', 'movie__rating')
+              'movie__year', 'movie__tmdb_id', 'movie__imdb_id', 'category__name', 'movie__id', 'movie__rating', 'movie__genre')
     rules = configuration(settings)['movie']
     iterator = query.values_list(*fields).iterator(chunk_size=BATCH_SIZE)
     seen = set() if settings.get('dedupe_movies_across_categories', False) else None
@@ -62,7 +62,9 @@ def movie_candidates(rec, query, settings):
         changed = []
         for row in rows:
             rec.report['generation_checked'] += 1
-            if not rules.evaluate(row[10], row[5], title=row[4])[0]:
+            if hasattr(rec, 'preparation') and rec.preparation.decision('movie', row[1], row[2]) != 1:
+                continue
+            if not rules.evaluate(row[10], row[5], row[11], title=row[4])[0]:
                 continue
             if seen is not None:
                 if row[3] in seen:

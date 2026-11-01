@@ -38,18 +38,24 @@ def plan(rec, kinds, rules=None):
             fields = ['id', 'name', 'year', 'tmdb_id', 'imdb_id']
             if rules is not None:
                 fields.append('rating')
-            if kind == 'series' and rules is not None:
+            if rules is not None:
                 fields.append('genre')
+            source_fields = ('m3u_account_id', 'stream_id' if kind == 'movie' else 'external_series_id') if rules is not None and hasattr(rec, 'preparation') else ()
             query = model.objects.values_list(
-                *(f'{kind}__{field}' for field in fields), 'category__name')
+                *(f'{kind}__{field}' for field in fields), 'category__name', *source_fields)
             # Include disabled accounts/categories: a passing source still protects
             # shared output. Finish all lookups before any filter removal occurs.
             for row in query.iterator(chunk_size=LOOKUP_BATCH_SIZE):
-                obj = SimpleNamespace(**dict(zip(fields, row[:-1])))
+                obj = SimpleNamespace(**dict(zip(fields, row[:len(fields)])))
+                category_name = row[len(fields)]
                 if rules is not None:
                     passed, rejected, _ = rules[kind].evaluate(
                         rating=obj.rating, release_year=obj.year,
                         genre=getattr(obj, 'genre', None), title=obj.name)
+                    if source_fields:
+                        verified = rec.preparation.verified_decision(kind, row[-2], row[-1],
+                                         (obj.rating, obj.year, obj.genre, obj.name))
+                        passed = verified != 0
                 else:
                     title, title_year = rec.plugin._extract_clean_name_and_year(obj.name or '')
                     title, year = rec.plugin._strip_redundant_trailing_year(title, obj.year or title_year)
@@ -61,7 +67,7 @@ def plan(rec, kinds, rules=None):
                     passed, rejected = not owned, ['media_library'] if owned else []
                 root = rec.roots[0 if kind == 'movie' else 1]
                 settings = rec.settings
-                args = (obj, root, row[-1] or '',
+                args = (obj, root, category_name or '',
                         bool(settings.get(f'nest_{"movies" if kind == "movie" else "series"}_by_category', False)),
                         bool(settings.get('append_tmdb_id_to_folder', False)),
                         settings.get('tmdb_tag_format') or 'plex')

@@ -6,7 +6,7 @@
 
 <p align="center">Generate <code>.strm</code> files and optional NFO metadata from Dispatcharr's stored VOD catalogue for a media server that supports stream-link files.</p>
 
-<p align="center"><i>Stable v1.20.2 · plugin identifier <code>vod2mlib</code></i></p>
+<p align="center"><i>Stable v1.21.1 · plugin identifier <code>vod2mlib</code></i></p>
 
 The plugin supports native category eligibility, optional Emby ownership checks, safe managed-file cleanup, persistent inventory and incremental generation, independent movie/series filters, timing telemetry, and scheduling controlled entirely through Settings → Save.
 
@@ -177,7 +177,7 @@ Enabled **Emby ownership cleanup** also archives NFO-only output for movies or w
 
 Whole-show ownership mode can archive a series folder containing only episode NFOs, with no `tvshow.nfo`. Episode mode preserves series NFO-only folders because whole-folder metadata cannot establish ownership of missing episode positions. Metadata is retained in the same persistent archive location, with `reason: ownership` in its recovery manifest. A failed Emby snapshot or incomplete native ownership lookup cannot trigger archival. Real-media files and their metadata are outside plugin output roots and are not moved.
 
-Rejected titles do not consume creation batch slots or trigger episode loading. Incremental signatures include filter settings and metadata, so changing stored metadata or relaxing rules causes affected candidates to be reconsidered and eligible output can return. Filter rejection never establishes upstream absence: M3U cleanup uses an unfiltered database source census.
+Rejected titles do not consume creation batch slots. Required filter enrichment runs before all metadata/title rejections and may incidentally import series episodes. Incremental signatures include filter settings and metadata, so changing stored metadata or relaxing rules causes affected candidates to be reconsidered and eligible output can return. Filter rejection never establishes upstream absence: M3U cleanup uses an unfiltered database source census.
 
 ### Media-library integration and cleanup
 
@@ -289,12 +289,12 @@ The entry point is `plugin.py` (`Plugin.fields`, `Plugin.actions`, `Plugin.run`)
 Scheduling uses Django model signals; Dispatcharr files are unchanged. Runtime dependencies come from Dispatcharr. Tests include pure helpers, model-backed generation/cleanup fixtures, process/deadline checks, and a real Django/beat Save integration test using an isolated SQLite database; a running Dispatcharr or live provider/Emby server is not required.
 
 ```bash
-python -m pip install pytest django celery django-celery-beat
+python -m pip install pytest requests django celery django-celery-beat
 python -m pytest -q
-python -m compileall -q plugin.py action_runner.py metadata_filters.py filter_cleanup.py orphan_nfo.py reconciliation.py media_library.py inventory.py generation_cache.py schedule_settings.py
+python -m compileall -q plugin.py action_runner.py metadata_filters.py filter_cleanup.py orphan_nfo.py reconciliation.py media_library.py inventory.py generation_cache.py schedule_settings.py enrichment.py
 ```
 
-GitHub CI tests Python 3.10 and 3.12. The v1.20.2 suite passes 457 tests on Linux and 452 tests with 5 platform-specific skips on Windows. Behavioral changes should update the README and [CHANGELOG.md](CHANGELOG.md), keep Python/manifest fields and versions aligned, and include all runtime modules when publishing. ZIP publication verifies checksums before updating the catalogue feed; do not replace an existing version's package with different bytes.
+GitHub CI tests Python 3.10 and 3.12. Behavioral changes should update the README and [CHANGELOG.md](CHANGELOG.md), keep Python/manifest fields and versions aligned, and include all runtime modules when publishing. ZIP publication verifies checksums before updating the catalogue feed; do not replace an existing version's package with different bytes.
 
 The bundled logo is reproducible: replace `tools/source_logo.png` and run `python tools/build_logo.py`.
 
@@ -302,6 +302,8 @@ The bundled logo is reproducible: replace `tools/source_logo.png` and run `pytho
 
 | Version | Changes |
 | --- | --- |
+| 1.21.1 | Isolate test/live output roots and cleanup; advance repeated series batches past unchanged or cached-empty entries while bounding provider fetches. |
+| 1.21.0 | Missing-only native enrichment, durable verified responses, and independent movie genre rules. |
 | 1.20.2 | Archive filter- and Emby ownership-excluded NFO-only folders with recovery manifests, preview and telemetry; clarify NFO controls; preserve right-aligned action buttons. |
 | 1.20.1 | One saved configuration for actions/schedules; Save validates and applies cron/timezone; enable toggle; legacy schedule-state preservation; Apply/Unschedule removed. |
 | 1.20.0 | Independent score/year/unknown/genre and title regex filters; next-run managed-output removal; database-only metadata/episodes; finer telemetry and faster output/cleanup handling. |
@@ -309,3 +311,16 @@ The bundled logo is reproducible: replace `tools/source_logo.png` and run `pytho
 | 1.18.1 | Native per-account/category eligibility; legacy category-prefix fields removed. |
 
 See [CHANGELOG.md](CHANGELOG.md) for earlier release notes and [Credits](#credits) for attribution.
+
+
+## Missing-only enrichment (1.21.x)
+
+Generation, catalogue snapshots, cleanup previews and selective cleanup share a supervised action lock and preparation stage. Only active accounts and their enabled native categories are eligible for provider requests. Missing year, valid numeric score (zero is unknown), or genre triggers a details request only when that field's filter is enabled. Provider account and movie/series IDs suffice; TMDB and IMDb IDs are optional. Movie and series genre include/exclude settings are independent. No external TMDB integration is used.
+
+Validated responses are stored privately in persistent plugin SQLite state before native population. Evidence survives relation replacement, upgrades, rescans and inventory rebuilds; changes to account server/username identity invalidate reuse. Native flags, timestamps and response age do not establish success or invalidate verified evidence. Cached values restore fields cleared by native listing imports without another request. Native helpers run transactionally through a scoped replay client; metadata, completion writes and expected episode source mappings are verified. Interrupted imports replay the cached response on a later run. Fetch state distinguishes a validated response (`success`) from native persistence (`pending`, `failed`, or `verified`). Per-field evidence records provider availability or verified omission, while episode evidence is `unverified`, `populated`, or `empty`; native fetched flags alone establish none of these outcomes.
+
+One HTTP request runs at a time, including authentication, with a 0.5-second gap after completion. Each source gets at most one attempt per action. Failures retry on later runs after a 15-minute exponential cooldown, capped at 24 hours; provider Retry-After can extend that delay. Individual responses are limited to 16 MiB. Actions retain their existing deadline and cancellation controls. Reports distinguish actual HTTP requests, cache reuse, verified omissions, failed/deferred sources, episode imports and protected filter candidates. Credentials and raw responses are excluded from plugin logs.
+
+Preview deletes no output files, but may update native metadata, incidental series episodes and plugin fetch state. Catalogue snapshot has the same enrichment side effects and reports unresolved counts; it generates, adopts and deletes no output. Explicit root cleanup and inventory rebuild do not initiate enrichment. Scheduled runs use current saved settings and the same supervised preparation pipeline. Emby remains an ownership check. Successful missing-only episode population does not detect future provider episode additions; refresh the catalogue through Dispatcharr to make those episodes available.
+
+For native compatibility verification, download Dispatcharr `apps/vod/tasks.py` from commits `1bddebdae153e418f9ea28eeb1ed00c1116939b6` (v0.24.0) and `065db17c5baf34d23ad89e46843857adc2a3c9b3` into an external directory as `vod_tasks_min.py` and `vod_tasks_current.py`. Set `VOD2MLIB_NATIVE_COMPAT_SOURCE_DIR` to that directory and run `python -m pytest`. The tests verify source hashes and execute selected original helpers/importers against isolated Django databases, covering transactional rollback, swallowed failures, partial imports, source reassignment and native model replacement. Without that environment variable, the two compatibility checks skip; ordinary tests run offline. Native source is not bundled with the plugin.

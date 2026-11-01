@@ -41,7 +41,7 @@ class Plugin:
     """Generate .strm files for VOD movies from Dispatcharr."""
 
     name = "VOD to Media Library"
-    version = "1.20.2"
+    version = "1.21.1"
     help_url = "https://github.com/R3XCHRIS/VOD2MLIB#readme"
     description = (
         "Convert Dispatcharr VODs into media-server-friendly .strm files, with "
@@ -296,9 +296,9 @@ class Plugin:
                   {'value': '100', 'label': '100 series'},
                   {'value': '250', 'label': '250 series'},
                   {'value': 'all', 'label': 'All series (may time out — use the schedule)'}],
-      'help_text': 'Number of series to process per run using episodes stored in Dispatcharr. With Refresh Existing Series or Full rescan, only series with STRM or NFO changes count toward this limit; unchanged series are checked without consuming a slot. Actions run in the background. For automatic full rescans, select Full rescan, enable Auto-Rescan, and Save.'},
+      'help_text': 'Number of series to generate per run. With Refresh Existing Series or Full rescan, only series with STRM or NFO changes count toward this limit; unchanged series do not consume a slot. Selected missing-episode provider fetches are also capped by this batch size. Missing selected episode lists are conditionally populated through Dispatcharr. Actions run in the background. For automatic full rescans, select Full rescan, enable Auto-Rescan, and Save.'},
      {'id': 'series_workers', 'label': 'Parallel Series Workers', 'type': 'select', 'default': '3', 'options': [{'value': '1', 'label': '1'}, {'value': '2', 'label': '2'}, {'value': '3', 'label': '3'}, {'value': '4', 'label': '4'}, {'value': '5', 'label': '5'}, {'value': '6', 'label': '6'}], 'help_text': 'Concurrent series generation tasks using Dispatcharr database metadata. Default 3; increase after measuring database and storage performance. Movies continue using 3 workers.'},
-     {'id': 'refresh_existing', 'label': 'Refresh Existing Series (rescan-friendly)', 'type': 'boolean', 'default': False, 'help_text': 'Re-evaluate existing series using only metadata and episodes already stored in Dispatcharr. Include newly stored episodes and refresh changed managed STRM/NFO output while preserving edited files. No provider requests or native metadata updates occur. Off skips already-generated series; On rechecks them. Full rescan forces this On. Refresh or fetch episode data in Dispatcharr before generating if its database is incomplete or stale.'},
+     {'id': 'refresh_existing', 'label': 'Refresh Existing Series (rescan-friendly)', 'type': 'boolean', 'default': False, 'help_text': 'Recheck existing series and changed managed output, preserving edited files. Enabled filter metadata and missing selected episode lists are conditionally fetched through Dispatcharr. Full rescan forces this On but does not force provider refetches. Successful responses never expire; newly added provider episodes appear after Dispatcharr updates its catalogue.'},
      {'id': 'nest_series_by_category',
       'label': 'Nest Series by Category',
       'type': 'boolean',
@@ -463,31 +463,28 @@ class Plugin:
       'button_color': 'blue'},
      {'id': 'preview_cleanup',
       'label': 'Preview selective cleanup',
-      'description': 'Preview removals and NFO archives; changes no files.',
-      'button_label': 'Preview',
-      'button_variant': 'outline',
-      'button_color': 'blue'},
+      'description': 'Check complete catalogues and log verified cleanup candidates without deleting output '
+                     'files. Enabled filter metadata may be fetched and persisted in Dispatcharr.',
+      'button_label': 'Preview', 'button_variant': 'outline', 'button_color': 'blue'},
      {'id': 'selective_cleanup',
       'label': 'Run selective cleanup',
-      'description': 'Apply filters and enabled ownership/source cleanup.',
-      'button_label': 'Clean up',
-      'button_variant': 'filled',
-      'button_color': 'orange'},
+      'description': 'Prepare enabled filter metadata, then delete verified filter rejections, duplicates and confirmed M3U removals according to configured settings.',
+      'button_label': 'Clean up', 'button_variant': 'filled', 'button_color': 'orange'},
      {'id': 'scan_all_vods',
       'label': '[LIBRARY] Catalogue snapshot',
-      'description': 'Count native movie/series eligibility. Read-only.',
+      'description': 'Enrich missing enabled filter metadata and report final unique movie/series counts plus unresolved items. May update native metadata and incidental episodes; generates, adopts and deletes no output.',
       'button_label': 'Scan',
       'button_variant': 'outline',
       'button_color': 'blue'},
      {'id': 'generate_movies',
       'label': '[GENERATE] Movies',
-      'description': 'Apply movie filters, then generate up to Batch Size.',
+      'description': 'Enrich missing enabled filter metadata, remove verified rejected output, then generate per Batch Size. Failed enrichment protects output.',
       'button_label': 'Generate',
       'button_variant': 'filled',
       'button_color': 'green'},
      {'id': 'generate_series',
       'label': '[GENERATE] Series',
-      'description': 'Apply series filters, then generate episode files.',
+      'description': "Enrich missing enabled filter metadata, remove verified rejected output, then populate missing selected episode lists and generate.",
       'button_label': 'Generate',
       'button_variant': 'filled',
       'button_color': 'green'},
@@ -499,10 +496,9 @@ class Plugin:
       'button_color': 'teal',
       'confirm': {'required': True,
                   'title': 'Run full rescan now?',
-                  'message': 'Apply current filters and configured cleanup, then process movies and series '
-                             'from Dispatcharr database metadata using saved batch limits. Rejected managed '
-                             'STRMs can be removed and rejected NFO-only folders archived. Only episodes '
-                             'already stored by Dispatcharr are available. This can take several minutes.'}},
+                  'message': 'Prepare movie and series filters, then refresh managed output within saved batch limits. '
+                             'Only missing required metadata or selected episode lists are fetched. Successful responses are reused; '
+                             'this does not detect new provider episodes. Large catalogues can take many minutes.'}},
      {'id': 'schedule_status',
       'label': '[SCHEDULE] Show status',
       'description': 'Show registered cron, last run, and total runs.',
@@ -567,7 +563,7 @@ class Plugin:
             self._series_worker_count(settings)
         except ValueError as error:
             return {"status": "error", "message": str(error)}
-        if action in {"generate_movies", "generate_series", "rescan_all", "cleanup_movies", "cleanup_series", "preview_cleanup", "selective_cleanup", "list_media_libraries", "rebuild_inventory"}:
+        if action in {"generate_movies", "generate_series", "rescan_all", "cleanup_movies", "cleanup_series", "preview_cleanup", "selective_cleanup", "list_media_libraries", "rebuild_inventory", "scan_all_vods"}:
             return action_runner.start(action, params, settings)
         return self._run_action(action, params, context)
 
@@ -579,7 +575,7 @@ class Plugin:
                 return {"status": "ok", "message": "; ".join(f"{x['Name']}: {x['Id']}" for x in libraries), "libraries": libraries}
             except Exception as error:
                 return {"status": "error", "message": str(error)}
-        mutating = {"generate_movies", "generate_series", "rescan_all", "cleanup_movies", "cleanup_series", "preview_cleanup", "selective_cleanup", "rebuild_inventory"}
+        mutating = {"generate_movies", "generate_series", "rescan_all", "cleanup_movies", "cleanup_series", "preview_cleanup", "selective_cleanup", "rebuild_inventory", "scan_all_vods"}
         if action not in mutating:
             return self._run_action(action, params, context)
         reconciliation = None
@@ -601,6 +597,7 @@ class Plugin:
                     with reconciliation.measure("inventory_drain"):
                         reconciliation.drain()
                     result['reconciliation'] = reconciliation.report
+                    result['message'] += f"; enrichment requests {reconciliation.report.get('enrichment', {}).get('requests', 0)}, deferred {reconciliation.report.get('enrichment', {}).get('deferred', 0)}"
                     result['message'] += f"; excluded {reconciliation.report['excluded']}, deleted {reconciliation.report['deleted']} ({reconciliation.report['filter_deleted']} by filters), cleanup errors {reconciliation.report['errors']}"
                     if action == 'preview_cleanup':
                         result['message'] += f"; filter removal candidates {reconciliation.report['filter_candidates']}"
@@ -729,8 +726,10 @@ class Plugin:
                 M3USeriesRelation.objects.all(), VODType.SERIES,
             )
             filter_counts = {
-                'movies': catalogue_counts(eligible_movies, 'movie', filter_rules['movie']),
-                'series': catalogue_counts(eligible_series, 'series', filter_rules['series']),
+                'movies': catalogue_counts(eligible_movies, 'movie', filter_rules['movie'],
+                                           getattr(getattr(self, '_reconciliation', None), 'preparation', None)),
+                'series': catalogue_counts(eligible_series, 'series', filter_rules['series'],
+                                           getattr(getattr(self, '_reconciliation', None), 'preparation', None)),
             }
             for kind, counts in filter_counts.items():
                 logger.info("Metadata filters %s (before library checks): %s", kind, counts)
@@ -1287,6 +1286,8 @@ class Plugin:
             submitted = 0
             seen = set() if dedupe_across_cats else None
             for rel in passing_relations(query, 'series', filter_rules['series']):
+                preparation = getattr(getattr(self, '_reconciliation', None), 'preparation', None)
+                if preparation and not preparation.allows(rel, 'series'): continue
                 if self._owned(rel.series, "series"):
                     continue
                 if seen is not None:
@@ -1309,6 +1310,7 @@ class Plugin:
         errors = 0
         series_created = 0
         series_changed = 0
+        episode_fetches = 0
         series_uptodate = 0
         episodes_evaluated = 0
         failures = []
@@ -1335,16 +1337,24 @@ class Plugin:
                 idx = 0
                 progress(force=True)
                 while futures or not exhausted:
-                    # Reserve a batch slot for each active worker. Unchanged
-                    # shows release their slot so repeated refreshes can reach
-                    # later catalogue entries instead of rescanning one prefix.
+                    # Reserve batch slots for active workers; unchanged shows
+                    # release their slots so later catalogue entries are reached.
                     while (not exhausted and len(futures) < workers
                            and (not refresh_existing or batch_size == "all"
-                                or series_changed + len(futures) < target_batch)):
+                                or series_changed + len(futures) < target_batch)
+                           and (batch_size == "all" or episode_fetches < target_batch)):
                         try: rel = next(to_process)
                         except StopIteration:
                             exhausted = True
                             break
+                        if rec and hasattr(rec, 'preparation'):
+                            requests_before = rec.report['enrichment']['requests']
+                            rel = rec.preparation.episodes(rel)
+                            if rec.report['enrichment']['requests'] > requests_before:
+                                episode_fetches += 1
+                            if rel is None: continue
+                            if not filter_rules['series'].evaluate(rel.series.rating, rel.series.year,
+                                                                  rel.series.genre, rel.series.name)[0]: continue
                         futures[executor.submit(self._process_single_series, rel, dispatcharr_url, generate_nfo,
                             series_root, logger, refresh_existing, nest_by_cat, append_tmdb_id,
                             omit_stream_id, tmdb_tag_format, nfo_omit_title)] = rel
@@ -1452,14 +1462,11 @@ class Plugin:
             # same .strm would flip between provider URLs on every rescan.
             with (rec.measure('episode_load', 1, worker=True) if rec else nullcontext()), \
                     (rec.episode_query() if rec else nullcontext()):
-                episode_rels = list(
-                    M3UEpisodeRelation.objects.filter(
-                        m3u_account=series_rel.m3u_account,
-                        episode__series=series,
-                    )
-                    .select_related('episode')
-                    .order_by('episode__season_number', 'episode__episode_number', 'id')
-                )
+                try:
+                    from .enrichment import source_episodes
+                except ImportError:
+                    from enrichment import source_episodes
+                episode_rels = source_episodes(series_rel)
 
             # One Episode can be reached by several relations. Every relation
             # resolves to the same filename (the name comes from the Episode),
@@ -1548,6 +1555,8 @@ class Plugin:
                     filename = self._sanitize_filename(filename)
 
                     strm_path = os.path.join(season_folder, f"{filename}.strm")
+                    if rec:
+                        strm_path = rec.managed_episode_path(episode_rel, strm_path)
                     decision = rec.episode_decision(episode_rel, strm_path, series) if rec else None
                     if decision and episode_cache.get(decision[0]) == decision[1]:
                         unchanged_episodes += 1
@@ -1579,7 +1588,7 @@ class Plugin:
                         new_episodes += 1
 
                     if generate_nfo:
-                        nfo_path = os.path.join(season_folder, f"{filename}.nfo")
+                        nfo_path = str(Path(strm_path).with_suffix(".nfo"))
                         with rec.measure('episode_nfo', 1, worker=True) if rec else nullcontext():
                             if not os.path.lexists(nfo_path):
                                 with open(nfo_path, 'w', encoding='utf-8') as f:

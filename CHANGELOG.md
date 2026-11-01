@@ -1,10 +1,19 @@
 # Changelog
 
-## Unreleased
+## v1.21.1 ? Output-root isolation and repeated refreshes (2026-11-01)
 
 - Isolate inventory cleanup, filter checks, and tracked-source queries to the configured output roots. Independent test/live directories retain their ownership records when inactive, and unrelated source records cannot disable cleanup in the active roots. Cover root switching, independent episode-link refresh, and source removals in regression tests.
 - Fix repeated series refresh batches stopping at the same unchanged shows, leaving later shows' episodes and playback links stale. Full rescan and Refresh Existing Series now count shows with STRM/NFO changes toward the batch limit; active workers reserve slots to keep that limit exact.
+- Keep selected missing-episode fetches bounded by the series batch size, while cached empty responses no longer block later sources on subsequent runs.
 - Cover repeated batches, changed episode stream IDs and UUIDs, and full-rescan removal of shows with orphaned episode rows. Clarify source-removal settings, retained NFOs, and Dispatcharr proxy URLs in troubleshooting.
+
+## v1.21.0-rc.1 ? Verified Dispatcharr enrichment before filtering
+
+- Enrich only missing metadata required by enabled year, score and genre filters, before title rules or generation. Add independent movie genre include/exclude settings.
+- Cache provider responses durably by account/provider source, replay native helpers transactionally and verify metadata and episode mappings. Successful evidence has no TTL; failed enrichment defers generation and protects filter output.
+- Populate missing selected series episode lists before workers, preserving batching and stable managed episode paths. Existing provider episodes are not automatically refreshed for future additions.
+- Supervise and lock catalogue snapshots; previews and snapshots can update native metadata, incidental episodes and fetch state without deleting output files. Inventory rebuild and explicit root cleanup initiate no enrichment.
+- Pace requests including authentication, honor retry cooldowns, and report cache reuse, verified omissions and deferred sources. Cover pinned minimum/current Dispatcharr helpers with real Django transaction compatibility checks.
 
 ## v1.20.2 — NFO-only cleanup and action layout (2026-10-03)
 
