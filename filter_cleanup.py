@@ -52,7 +52,7 @@ def cleanup(rec, action):
     rec.filter_cleanup_active = True
     placeholders = ','.join('?' for _ in kinds)
     cursor = db.execute(
-        f'SELECT DISTINCT s.source FROM sources s JOIN files f ON f.path=s.path '
+        f'SELECT DISTINCT s.source FROM sources s JOIN scoped_files f ON f.path=s.path '
         f'WHERE f.kind IN ({placeholders}) ORDER BY s.source', kinds)
     # Complete all bounded native lookups before allowing any filter deletion.
     # Missing/ambiguous source mappings stay unknown and protect shared output.
@@ -102,7 +102,7 @@ def cleanup(rec, action):
             f'Filter metadata lookup failed; no filter removals applied ({type(error).__name__})'
         ) from error
     sql = (
-        f'SELECT f.* FROM files f WHERE f.kind IN ({placeholders}) '
+        f'SELECT f.* FROM scoped_files f WHERE f.kind IN ({placeholders}) '
         'AND EXISTS (SELECT 1 FROM sources s WHERE s.path=f.path) '
         'AND NOT EXISTS (SELECT 1 FROM sources s LEFT JOIN filter_sources d ON d.source=s.source '
         'WHERE s.path=f.path AND (d.passed IS NULL OR d.passed=1)) '

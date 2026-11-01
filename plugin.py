@@ -296,7 +296,7 @@ class Plugin:
                   {'value': '100', 'label': '100 series'},
                   {'value': '250', 'label': '250 series'},
                   {'value': 'all', 'label': 'All series (may time out — use the schedule)'}],
-      'help_text': 'Number of series to process per run using episodes stored in Dispatcharr. Actions run in the background. For automatic full rescans, select Full rescan, enable Auto-Rescan, and Save.'},
+      'help_text': 'Number of series to process per run using episodes stored in Dispatcharr. With Refresh Existing Series or Full rescan, only series with STRM or NFO changes count toward this limit; unchanged series are checked without consuming a slot. Actions run in the background. For automatic full rescans, select Full rescan, enable Auto-Rescan, and Save.'},
      {'id': 'series_workers', 'label': 'Parallel Series Workers', 'type': 'select', 'default': '3', 'options': [{'value': '1', 'label': '1'}, {'value': '2', 'label': '2'}, {'value': '3', 'label': '3'}, {'value': '4', 'label': '4'}, {'value': '5', 'label': '5'}, {'value': '6', 'label': '6'}], 'help_text': 'Concurrent series generation tasks using Dispatcharr database metadata. Default 3; increase after measuring database and storage performance. Movies continue using 3 workers.'},
      {'id': 'refresh_existing', 'label': 'Refresh Existing Series (rescan-friendly)', 'type': 'boolean', 'default': False, 'help_text': 'Re-evaluate existing series using only metadata and episodes already stored in Dispatcharr. Include newly stored episodes and refresh changed managed STRM/NFO output while preserving edited files. No provider requests or native metadata updates occur. Off skips already-generated series; On rechecks them. Full rescan forces this On. Refresh or fetch episode data in Dispatcharr before generating if its database is incomplete or stale.'},
      {'id': 'nest_series_by_category',
@@ -1300,7 +1300,7 @@ class Plugin:
                     if self._series_already_processed(folder): continue
                 yield rel
                 submitted += 1
-                if batch_size != "all" and submitted >= target_batch: break
+                if not refresh_existing and batch_size != "all" and submitted >= target_batch: break
         to_process = candidates()
 
         created_strm = 0
@@ -1308,6 +1308,7 @@ class Plugin:
         created_nfo = 0
         errors = 0
         series_created = 0
+        series_changed = 0
         series_uptodate = 0
         episodes_evaluated = 0
         failures = []
@@ -1334,7 +1335,12 @@ class Plugin:
                 idx = 0
                 progress(force=True)
                 while futures or not exhausted:
-                    while not exhausted and len(futures) < workers:
+                    # Reserve a batch slot for each active worker. Unchanged
+                    # shows release their slot so repeated refreshes can reach
+                    # later catalogue entries instead of rescanning one prefix.
+                    while (not exhausted and len(futures) < workers
+                           and (not refresh_existing or batch_size == "all"
+                                or series_changed + len(futures) < target_batch)):
                         try: rel = next(to_process)
                         except StopIteration:
                             exhausted = True
@@ -1356,6 +1362,8 @@ class Plugin:
                             errors += 1
                             failures.append(str(error))
                             continue
+                        if result.get("created") or result.get("nfo_files", 0):
+                            series_changed += 1
                         if result.get("uptodate"): series_uptodate += 1
                         elif result.get("created"):
                             series_created += 1

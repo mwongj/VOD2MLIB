@@ -162,7 +162,7 @@ def archive(rec, candidates, dry_run=False, prefix='filter'):
         if not any(str(path) not in ignored for path in Path(name).parent.rglob('*.strm')):
             ignored.add(name)
     # Failed inventory finalization must remain retryable; do not move its NFOs.
-    tracked = {str(parent) for (path,) in rec.store.db.execute('SELECT path FROM files')
+    tracked = {str(parent) for (path,) in rec.store.db.execute('SELECT path FROM scoped_files')
                if path not in removals for parent in Path(path).parents}
     inspected_files = 0
     preview_folders = getattr(rec, 'nfo_preview_archives', set())

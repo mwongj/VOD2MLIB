@@ -153,6 +153,7 @@ class InventoryStore:
             "CREATE TEMP TABLE catalogue(uuid TEXT, stream TEXT, identity TEXT, source TEXT, season INTEGER, episode INTEGER)"
         )
         self.db.execute("CREATE INDEX temp.catalogue_uuid ON catalogue(uuid,stream)")
+        self.db.execute('CREATE TEMP VIEW scoped_files AS SELECT * FROM files')
         if not self.db.execute(
             "SELECT 1 FROM generation_state WHERE key='absolute_paths'",
         ).fetchone():
@@ -174,6 +175,20 @@ class InventoryStore:
 
     def close(self):
         self.db.close()
+
+    def set_roots(self, roots):
+        """Limit this action's reads to its configured output directories.
+
+        Keep other roots' ownership records intact for independent test/live
+        output. Resolved containment is still checked before file mutations.
+        """
+        self.db.execute('CREATE TEMP TABLE active_roots(prefix TEXT PRIMARY KEY)')
+        self.db.executemany('INSERT OR IGNORE INTO active_roots VALUES (?)',
+                            [(os.path.join(os.path.abspath(root), ''),) for root in roots])
+        self.db.execute('DROP VIEW scoped_files')
+        self.db.execute('CREATE TEMP VIEW scoped_files AS SELECT f.* FROM files f '
+                        'WHERE EXISTS (SELECT 1 FROM active_roots r '
+                        'WHERE substr(f.path,1,length(r.prefix))=r.prefix)')
 
     def discovery_complete(self, root, context):
         return bool(self.db.execute(
@@ -244,7 +259,7 @@ class InventoryStore:
             self.db.executemany("INSERT OR IGNORE INTO sources VALUES (?,?)", sources)
 
     def row_batches(self, batch=BATCH_SIZE, skip_filters=False):
-        sql = 'SELECT f.* FROM files f WHERE f.path>?'
+        sql = 'SELECT f.* FROM scoped_files f WHERE f.path>?'
         if skip_filters:
             sql += ' AND NOT EXISTS (SELECT 1 FROM filter_handled h WHERE h.path=f.path)'
         sql += ' ORDER BY f.path LIMIT ?'

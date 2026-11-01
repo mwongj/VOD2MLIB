@@ -203,7 +203,7 @@
           "label": "All series (may time out — use the schedule)"
         }
       ],
-      "help_text": "Number of series to process per run using episodes stored in Dispatcharr. Actions run in the background. For automatic full rescans, select Full rescan, enable Auto-Rescan, and Save."
+      "help_text": "Number of series to process per run using episodes stored in Dispatcharr. With Refresh Existing Series or Full rescan, only series with STRM or NFO changes count toward this limit; unchanged series are checked without consuming a slot. Actions run in the background. For automatic full rescans, select Full rescan, enable Auto-Rescan, and Save."
     },
     {
       "id": "series_workers",

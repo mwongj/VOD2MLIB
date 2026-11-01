@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Isolate inventory cleanup, filter checks, and tracked-source queries to the configured output roots. Independent test/live directories retain their ownership records when inactive, and unrelated source records cannot disable cleanup in the active roots. Cover root switching, independent episode-link refresh, and source removals in regression tests.
+- Fix repeated series refresh batches stopping at the same unchanged shows, leaving later shows' episodes and playback links stale. Full rescan and Refresh Existing Series now count shows with STRM/NFO changes toward the batch limit; active workers reserve slots to keep that limit exact.
+- Cover repeated batches, changed episode stream IDs and UUIDs, and full-rescan removal of shows with orphaned episode rows. Clarify source-removal settings, retained NFOs, and Dispatcharr proxy URLs in troubleshooting.
+
 ## v1.20.2 — NFO-only cleanup and action layout (2026-10-03)
 
 - Keep action descriptions and button labels compact so buttons follow the existing right-aligned layout.

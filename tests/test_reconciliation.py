@@ -1608,7 +1608,8 @@ def test_tracked_presence_matches_complete_census_for_all_managed_sources(librar
     library.rows['movies'].extend([movie, other, relation(media(99))])
     library.rows['episodes'].extend([episode, orphan, relation(media(98, series=show), 'episode')])
     full = Reconciliation(library.p, library.settings, LOG, library.tmp / 'full')
-    targeted = Reconciliation(library.p, library.settings, LOG, library.tmp / 'targeted')
+    targeted = Reconciliation(library.p, {**library.settings, 'root_folder': str(library.tmp)},
+                              LOG, library.tmp / 'targeted')
     try:
         full.source_census()
         expected = {r[0] for r in full.store.db.execute('SELECT source FROM live')}
@@ -1623,7 +1624,8 @@ def test_tracked_presence_matches_complete_census_for_all_managed_sources(librar
         alias = json.dumps(json.loads(source_for(movie, 'movie')), separators=(',', ':'))
         required.add(alias)
         with targeted.store.db:
-            targeted.store.db.execute('INSERT INTO sources VALUES (?,?)', ('alias-path', alias))
+            targeted.store.db.execute('INSERT INTO sources VALUES (?,?)',
+                                      (str(library.tmp / 'presence-0.strm'), alias))
         targeted.tracked_source_census()
         found = {r[0] for r in targeted.store.db.execute('SELECT source FROM live')}
         assert found == (expected & required) | {alias}

@@ -139,6 +139,7 @@ class Reconciliation:
             settings.get("root_folder", "/VODS/Movies"),
             settings.get("series_root_folder", "/VODS/Series"),
         ]
+        self.store.set_roots(self.roots)
         self.m3u_complete = False
         self.verify_missing = True
         self.bootstrap_movies = not self.store.db.execute(
@@ -504,7 +505,8 @@ class Reconciliation:
 
         self.progress('Checking every tracked Dispatcharr source')
         self.census_count = 0
-        cursor = self.store.db.execute('SELECT DISTINCT source FROM sources ORDER BY source')
+        cursor = self.store.db.execute(
+            'SELECT DISTINCT s.source FROM sources s JOIN scoped_files f ON f.path=s.path ORDER BY s.source')
         while True:
             sources = cursor.fetchmany(LOOKUP_BATCH_SIZE)
             if not sources:
