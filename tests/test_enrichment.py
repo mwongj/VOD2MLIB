@@ -268,6 +268,41 @@ def test_requests_include_authentication_and_are_paced(monkeypatch):
     assert waits == pytest.approx([0, 0.45])
 
 
+def test_login_is_reused_across_fetches_and_dropped_after_failure(monkeypatch):
+    import logging
+    import sys
+    event = NS(is_set=lambda: False, wait=lambda delay: False)
+    preparation = NS(rec=NS(cancelled=event), count=lambda key: None, check_cancelled=lambda: None)
+    calls, fail = [], []
+    class Client:
+        def __init__(self, **kwargs): self.server_info = None
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+        def get_series_info(self, series_id):
+            if not self.server_info:
+                calls.append('login')
+                self.server_info = {'user_info': {'auth': 1}}
+            calls.append(series_id)
+            if fail: raise ValueError('provider failure')
+            return {'info': {}, 'episodes': {}}
+    monkeypatch.setitem(sys.modules, 'core.xtream_codes', NS(Client=Client, logger=logging.getLogger('login-test')))
+    account = NS(server_url='http://provider.test', username='u', password='p', get_user_agent_string=lambda: 'agent')
+    other = NS(server_url='http://provider.test', username='u2', password='p', get_user_agent_string=lambda: 'agent')
+    adapter = NativeAdapter(preparation)
+    rel = lambda external, acct=account: NS(m3u_account=acct, external_series_id=external)
+    adapter.fetch(rel(1), 'series')
+    adapter.fetch(rel(2), 'series')
+    assert calls == ['login', 1, 2]
+    adapter.fetch(rel(3, other), 'series')
+    assert calls[-2:] == ['login', 3]
+    fail.append(True)
+    with pytest.raises(ValueError):
+        adapter.fetch(rel(4), 'series')
+    fail.clear()
+    adapter.fetch(rel(5), 'series')
+    assert calls[-3:] == [4, 'login', 5]
+
+
 def test_retry_after_extends_cooldown(library, provider, monkeypatch):
     library.rows['movies'].append(relation(media(1, year=None)))
     def fail(*args):

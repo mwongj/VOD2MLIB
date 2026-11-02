@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.21.3 - Reuse the provider login for paced fetches (2026-11-02)
+
+- Fetching a series' episode list built a new Xtream client each time, which logged in again before every `get_series_info` call: two paced requests per series. Reuse the login result per account credentials so each fetch is one request, roughly doubling the rate of large first-time syncs at the same request spacing. Every call still carries the credentials, and the cached login is dropped after any failure. Covered by a regression test.
+
 ## v1.21.2 - Fast per-episode inventory lookup (2026-11-02)
 
 - Fix full rescans and series generation slowing quadratically on large libraries. Finding an episode's existing managed path scanned every tracked series file for each episode (about 44 ms per lookup with ~50k tracked files); it now starts from the indexed provider source and takes about 0.6 ms with identical results. Cover the query plan with a regression test.

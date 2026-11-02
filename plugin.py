@@ -41,7 +41,7 @@ class Plugin:
     """Generate .strm files for VOD movies from Dispatcharr."""
 
     name = "VOD to Media Library"
-    version = "1.21.2"
+    version = "1.21.3"
     help_url = "https://github.com/R3XCHRIS/VOD2MLIB#readme"
     description = (
         "Convert Dispatcharr VODs into media-server-friendly .strm files, with "
