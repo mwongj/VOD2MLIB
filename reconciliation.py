@@ -139,6 +139,7 @@ class Reconciliation:
             settings.get("root_folder", "/VODS/Movies"),
             settings.get("series_root_folder", "/VODS/Series"),
         ]
+        self.store.set_roots(self.roots)
         self.m3u_complete = False
         self.verify_missing = True
         self.bootstrap_movies = not self.store.db.execute(
@@ -246,6 +247,16 @@ class Reconciliation:
         self.logger.warning(message)
 
     def prepare(self, action):
+        try:
+            from .enrichment import Preparation, KINDS
+        except ImportError:
+            from enrichment import Preparation, KINDS
+        if action in KINDS:
+            self.preparation = Preparation(self)
+            with self.measure('metadata_preparation'):
+                self.preparation.prepare(action)
+        if action == 'scan_all_vods':
+            return
         self.verify_missing = action not in ('generate_movies', 'generate_series', 'rescan_all')
         if not os.path.isdir(self.roots[0]):
             with self.store.db:
@@ -504,7 +515,8 @@ class Reconciliation:
 
         self.progress('Checking every tracked Dispatcharr source')
         self.census_count = 0
-        cursor = self.store.db.execute('SELECT DISTINCT source FROM sources ORDER BY source')
+        cursor = self.store.db.execute(
+            'SELECT DISTINCT s.source FROM sources s JOIN scoped_files f ON f.path=s.path ORDER BY s.source')
         while True:
             sources = cursor.fetchmany(LOOKUP_BATCH_SIZE)
             if not sources:
@@ -738,6 +750,7 @@ class Reconciliation:
             "Previewing cleanup" if dry_run else "Reconciling generated files"
         )
         for batch in self.store.row_batches(skip_filters=getattr(self, 'filter_cleanup_active', False)):
+            if self.cancelled.is_set(): raise RuntimeError('Action cancelled')
             with self.measure('cleanup_batch', len(batch)), self.store.forget_batch():
                 for row in batch:
                     identity = Identity(
@@ -888,6 +901,20 @@ class Reconciliation:
             ))
         finally:
             db.close()
+
+    def managed_episode_path(self, rel, proposed):
+        # Reuse the verified inventory path when provider episode/show titles change.
+        with closing(sqlite3.connect(self.reader_uri, uri=True)) as reader:
+            rows = reader.execute(
+                # CROSS JOIN pins the order: start from the indexed source, then probe
+                # files by primary key. Without it SQLite scans every series row per episode.
+                'SELECT f.path FROM sources s CROSS JOIN files f ON f.path=s.path '
+                'WHERE s.source=? AND f.kind=? AND f.season=? AND f.episode=? LIMIT 2',
+                (source_for(rel, 'episode'), 'series', rel.episode.season_number or 0,
+                 rel.episode.episode_number or 0)).fetchall()
+        if len(rows) == 1 and contained(rows[0][0], self.roots) and os.path.lexists(rows[0][0]):
+            return rows[0][0]
+        return proposed
 
     def episode_decision(self, rel, path, series):
         ep = rel.episode

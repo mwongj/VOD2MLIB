@@ -110,14 +110,16 @@ def remove_strm(row, roots, dry_run=False):
 class InventoryStore:
     def __init__(self, directory):
         Path(directory).mkdir(parents=True, exist_ok=True)
+        os.chmod(directory, 0o700)
         self.db_path = str(Path(directory) / "inventory.sqlite3")
         self.db = sqlite3.connect(self.db_path, timeout=10)
         self.db.row_factory = sqlite3.Row
+        os.chmod(self.db_path, 0o600)
         # Bound the temporary census B-tree cache to 32 MiB. Keep temporary
         # tables on disk and leave persistent inventory durability unchanged.
         self.db.execute("PRAGMA temp.cache_size=-32768")
         version = self.db.execute("PRAGMA user_version").fetchone()[0]
-        if version not in (0, 1, 2, 3):
+        if version not in (0, 1, 2, 3, 4):
             self.db.close()
             raise ValueError("Unsupported inventory schema")
         with self.db:
@@ -142,7 +144,12 @@ class InventoryStore:
                 CREATE INDEX IF NOT EXISTS generation_paths ON generation_entries(path);
                 CREATE TABLE IF NOT EXISTS generation_state (
                     key TEXT PRIMARY KEY, value TEXT NOT NULL);
-                PRAGMA user_version=3;
+                CREATE TABLE IF NOT EXISTS fetch_evidence (
+                    source TEXT PRIMARY KEY, identity TEXT NOT NULL, response TEXT,
+                    response_state TEXT NOT NULL, persistence TEXT NOT NULL,
+                    episodes TEXT NOT NULL, failures INTEGER NOT NULL DEFAULT 0,
+                    retry_at REAL NOT NULL DEFAULT 0, fields TEXT NOT NULL DEFAULT '{}');
+                PRAGMA user_version=4;
                 COMMIT;
             """)
         self.db.execute("CREATE TEMP TABLE live(source TEXT PRIMARY KEY)")
@@ -153,6 +160,7 @@ class InventoryStore:
             "CREATE TEMP TABLE catalogue(uuid TEXT, stream TEXT, identity TEXT, source TEXT, season INTEGER, episode INTEGER)"
         )
         self.db.execute("CREATE INDEX temp.catalogue_uuid ON catalogue(uuid,stream)")
+        self.db.execute('CREATE TEMP VIEW scoped_files AS SELECT * FROM files')
         if not self.db.execute(
             "SELECT 1 FROM generation_state WHERE key='absolute_paths'",
         ).fetchone():
@@ -174,6 +182,20 @@ class InventoryStore:
 
     def close(self):
         self.db.close()
+
+    def set_roots(self, roots):
+        """Limit this action's reads to its configured output directories.
+
+        Keep other roots' ownership records intact for independent test/live
+        output. Resolved containment is still checked before file mutations.
+        """
+        self.db.execute('CREATE TEMP TABLE active_roots(prefix TEXT PRIMARY KEY)')
+        self.db.executemany('INSERT OR IGNORE INTO active_roots VALUES (?)',
+                            [(os.path.join(os.path.abspath(root), ''),) for root in roots])
+        self.db.execute('DROP VIEW scoped_files')
+        self.db.execute('CREATE TEMP VIEW scoped_files AS SELECT f.* FROM files f '
+                        'WHERE EXISTS (SELECT 1 FROM active_roots r '
+                        'WHERE substr(f.path,1,length(r.prefix))=r.prefix)')
 
     def discovery_complete(self, root, context):
         return bool(self.db.execute(
@@ -244,7 +266,7 @@ class InventoryStore:
             self.db.executemany("INSERT OR IGNORE INTO sources VALUES (?,?)", sources)
 
     def row_batches(self, batch=BATCH_SIZE, skip_filters=False):
-        sql = 'SELECT f.* FROM files f WHERE f.path>?'
+        sql = 'SELECT f.* FROM scoped_files f WHERE f.path>?'
         if skip_filters:
             sql += ' AND NOT EXISTS (SELECT 1 FROM filter_handled h WHERE h.path=f.path)'
         sql += ' ORDER BY f.path LIMIT ?'

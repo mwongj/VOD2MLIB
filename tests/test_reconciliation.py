@@ -201,6 +201,41 @@ def test_episode_sql_wrapper_records_counts_without_query_data(library, monkeypa
         rec.store.close()
 
 
+def test_managed_episode_lookup_starts_from_indexed_source_not_a_series_scan(tmp_path):
+    store = InventoryStore(tmp_path / "state")
+    target = tmp_path / "old" / "Show - S01E05.strm"
+    target.parent.mkdir()
+    target.write_text("url")
+    with store.db:
+        for number in range(200):
+            path = str(target) if number == 5 else f"/gone/{number}.strm"
+            store.db.execute(
+                "INSERT INTO files(path,kind,title,season,episode,strm_url,nfos) VALUES (?,?,?,?,?,?,?)",
+                (path, "series", "Show", 1, number, "url", "{}"))
+            store.db.execute("INSERT INTO sources VALUES (?,?)",
+                             (path, json.dumps(["episode", "1", str(number)])))
+    rec = Reconciliation.__new__(Reconciliation)
+    rec.reader_uri = Path(store.db_path).resolve().as_uri() + "?mode=ro"
+    rec.roots = [str(tmp_path)]
+    statements = []
+    real_connect = sqlite3.connect
+
+    def spying_connect(*args, **kwargs):
+        connection = real_connect(*args, **kwargs)
+        connection.set_trace_callback(statements.append)
+        return connection
+
+    rel = NS(m3u_account_id=1, stream_id=5, episode=NS(season_number=1, episode_number=5))
+    original, sqlite3.connect = sqlite3.connect, spying_connect
+    try:
+        assert rec.managed_episode_path(rel, "proposed") == str(target)
+    finally:
+        sqlite3.connect = original
+    query = next(sql for sql in statements if "FROM sources" in sql)
+    plan = " ".join(row[3] for row in store.db.execute("EXPLAIN QUERY PLAN " + query))
+    assert "source_ids" in plan and "title_year" not in plan
+
+
 class Query:
     def __init__(self, rows):
         self.rows = rows
@@ -626,7 +661,7 @@ def test_schema_persistence_missing_files_and_rollback(tmp_path):
     file.write_text("url")
     identity = Identity("movie", "A", 2000, "1")
     store.record(str(file), identity, "source")
-    assert store.db.execute("PRAGMA user_version").fetchone()[0] == 3
+    assert store.db.execute("PRAGMA user_version").fetchone()[0] == 4
     store.close()
     store = InventoryStore(tmp_path / "state")
     assert list(store.rows())[0]["tmdb"] == "1"
@@ -1500,7 +1535,7 @@ def test_discovery_markers_survive_schema_one_upgrade(tmp_path):
     store.db.execute("DROP TABLE discovery_roots")
     store.db.execute("PRAGMA user_version=1"); store.close()
     store = InventoryStore(tmp_path / "state")
-    assert store.db.execute("PRAGMA user_version").fetchone()[0] == 3
+    assert store.db.execute("PRAGMA user_version").fetchone()[0] == 4
     assert [tuple(row) for row in store.rows()] == before
     store.mark_discovered("root", "context"); store.close()
     store = InventoryStore(tmp_path / "state")
@@ -1608,7 +1643,8 @@ def test_tracked_presence_matches_complete_census_for_all_managed_sources(librar
     library.rows['movies'].extend([movie, other, relation(media(99))])
     library.rows['episodes'].extend([episode, orphan, relation(media(98, series=show), 'episode')])
     full = Reconciliation(library.p, library.settings, LOG, library.tmp / 'full')
-    targeted = Reconciliation(library.p, library.settings, LOG, library.tmp / 'targeted')
+    targeted = Reconciliation(library.p, {**library.settings, 'root_folder': str(library.tmp)},
+                              LOG, library.tmp / 'targeted')
     try:
         full.source_census()
         expected = {r[0] for r in full.store.db.execute('SELECT source FROM live')}
@@ -1623,7 +1659,8 @@ def test_tracked_presence_matches_complete_census_for_all_managed_sources(librar
         alias = json.dumps(json.loads(source_for(movie, 'movie')), separators=(',', ':'))
         required.add(alias)
         with targeted.store.db:
-            targeted.store.db.execute('INSERT INTO sources VALUES (?,?)', ('alias-path', alias))
+            targeted.store.db.execute('INSERT INTO sources VALUES (?,?)',
+                                      (str(library.tmp / 'presence-0.strm'), alias))
         targeted.tracked_source_census()
         found = {r[0] for r in targeted.store.db.execute('SELECT source FROM live')}
         assert found == (expected & required) | {alias}
@@ -1682,7 +1719,7 @@ def test_failed_lean_query_never_establishes_m3u_absence(library, monkeypatch):
     monkeypatch.setattr(Query, "iterator", fail)
     result = library.run("selective_cleanup", m3u_cleanup_enabled=True)
     assert result["reconciliation"]["deleted"] == 0
-    assert result["reconciliation"]["warnings"] and strm.exists()
+    assert result["status"] == "error" and strm.exists()
 
 
 def test_cleanup_uses_database_source_census_once(library, monkeypatch):
