@@ -906,7 +906,9 @@ class Reconciliation:
         # Reuse the verified inventory path when provider episode/show titles change.
         with closing(sqlite3.connect(self.reader_uri, uri=True)) as reader:
             rows = reader.execute(
-                'SELECT f.path FROM files f JOIN sources s ON s.path=f.path '
+                # CROSS JOIN pins the order: start from the indexed source, then probe
+                # files by primary key. Without it SQLite scans every series row per episode.
+                'SELECT f.path FROM sources s CROSS JOIN files f ON f.path=s.path '
                 'WHERE s.source=? AND f.kind=? AND f.season=? AND f.episode=? LIMIT 2',
                 (source_for(rel, 'episode'), 'series', rel.episode.season_number or 0,
                  rel.episode.episode_number or 0)).fetchall()

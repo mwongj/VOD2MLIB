@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.21.2 - Fast per-episode inventory lookup (2026-11-02)
+
+- Fix full rescans and series generation slowing quadratically on large libraries. Finding an episode's existing managed path scanned every tracked series file for each episode (about 44 ms per lookup with ~50k tracked files); it now starts from the indexed provider source and takes about 0.6 ms with identical results. Cover the query plan with a regression test.
+
 ## v1.21.1 ? Output-root isolation and repeated refreshes (2026-11-01)
 
 - Isolate inventory cleanup, filter checks, and tracked-source queries to the configured output roots. Independent test/live directories retain their ownership records when inactive, and unrelated source records cannot disable cleanup in the active roots. Cover root switching, independent episode-link refresh, and source removals in regression tests.

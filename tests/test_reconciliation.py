@@ -201,6 +201,41 @@ def test_episode_sql_wrapper_records_counts_without_query_data(library, monkeypa
         rec.store.close()
 
 
+def test_managed_episode_lookup_starts_from_indexed_source_not_a_series_scan(tmp_path):
+    store = InventoryStore(tmp_path / "state")
+    target = tmp_path / "old" / "Show - S01E05.strm"
+    target.parent.mkdir()
+    target.write_text("url")
+    with store.db:
+        for number in range(200):
+            path = str(target) if number == 5 else f"/gone/{number}.strm"
+            store.db.execute(
+                "INSERT INTO files(path,kind,title,season,episode,strm_url,nfos) VALUES (?,?,?,?,?,?,?)",
+                (path, "series", "Show", 1, number, "url", "{}"))
+            store.db.execute("INSERT INTO sources VALUES (?,?)",
+                             (path, json.dumps(["episode", "1", str(number)])))
+    rec = Reconciliation.__new__(Reconciliation)
+    rec.reader_uri = Path(store.db_path).resolve().as_uri() + "?mode=ro"
+    rec.roots = [str(tmp_path)]
+    statements = []
+    real_connect = sqlite3.connect
+
+    def spying_connect(*args, **kwargs):
+        connection = real_connect(*args, **kwargs)
+        connection.set_trace_callback(statements.append)
+        return connection
+
+    rel = NS(m3u_account_id=1, stream_id=5, episode=NS(season_number=1, episode_number=5))
+    original, sqlite3.connect = sqlite3.connect, spying_connect
+    try:
+        assert rec.managed_episode_path(rel, "proposed") == str(target)
+    finally:
+        sqlite3.connect = original
+    query = next(sql for sql in statements if "FROM sources" in sql)
+    plan = " ".join(row[3] for row in store.db.execute("EXPLAIN QUERY PLAN " + query))
+    assert "source_ids" in plan and "title_year" not in plan
+
+
 class Query:
     def __init__(self, rows):
         self.rows = rows

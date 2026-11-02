@@ -6,7 +6,7 @@
 
 <p align="center">Generate <code>.strm</code> files and optional NFO metadata from Dispatcharr's stored VOD catalogue for a media server that supports stream-link files.</p>
 
-<p align="center"><i>Stable v1.21.1 · plugin identifier <code>vod2mlib</code></i></p>
+<p align="center"><i>Stable v1.21.2 · plugin identifier <code>vod2mlib</code></i></p>
 
 The plugin supports native category eligibility, optional Emby ownership checks, safe managed-file cleanup, persistent inventory and incremental generation, independent movie/series filters, timing telemetry, and scheduling controlled entirely through Settings → Save.
 
@@ -302,6 +302,7 @@ The bundled logo is reproducible: replace `tools/source_logo.png` and run `pytho
 
 | Version | Changes |
 | --- | --- |
+| 1.21.2 | Fix full rescans slowing to a crawl on large libraries: the per-episode inventory lookup scanned every tracked series file (about 44 ms each) and now starts from the indexed source (about 0.6 ms) |
 | 1.21.1 | Isolate test/live output roots and cleanup; advance repeated series batches past unchanged or cached-empty entries while bounding provider fetches. |
 | 1.21.0 | Missing-only native enrichment, durable verified responses, and independent movie genre rules. |
 | 1.20.2 | Archive filter- and Emby ownership-excluded NFO-only folders with recovery manifests, preview and telemetry; clarify NFO controls; preserve right-aligned action buttons. |
