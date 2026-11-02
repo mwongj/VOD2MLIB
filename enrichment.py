@@ -128,6 +128,9 @@ class NativeAdapter:
     def __init__(self, preparation):
         self.preparation = preparation
         self.last_request = 0.0
+        # Login results by credentials. Xtream authenticates lazily on a new
+        # client, which doubled every paced fetch. Dropped on any failure.
+        self.logins = {}
 
     def fetch(self, rel, kind):
         from core.xtream_codes import Client
@@ -171,10 +174,21 @@ class NativeAdapter:
                 self.last_request = time.monotonic()
         with patch.object(requests.sessions.Session, 'request', paced), patch.object(
                 importlib.import_module('core.xtream_codes').logger, 'disabled', True):
+            login = (account.server_url, account.username, account.password)
             with Client(server_url=account.server_url, username=account.username,
                         password=account.password, user_agent=ua) as client:
-                return (client.get_vod_info(rel.stream_id) if kind == 'movie'
-                        else client.get_series_info(rel.external_series_id))
+                # A client with server_info skips its own authentication request;
+                # each call still carries the credentials, so the provider still
+                # rejects bad ones. Forget the login on any failure.
+                if login in self.logins: client.server_info = self.logins[login]
+                try:
+                    payload = (client.get_vod_info(rel.stream_id) if kind == 'movie'
+                               else client.get_series_info(rel.external_series_id))
+                except BaseException:
+                    self.logins.pop(login, None)
+                    raise
+                if getattr(client, 'server_info', None): self.logins[login] = client.server_info
+                return payload
 
     def reload(self, rel, kind):
         from apps.vod.models import M3UMovieRelation, M3USeriesRelation

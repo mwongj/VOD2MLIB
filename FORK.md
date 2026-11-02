@@ -11,7 +11,7 @@ This file documents the separately packaged mwongj build. The shared [README](RE
    https://raw.githubusercontent.com/mwongj/Dispatcharr-Plugins/releases/manifest.json
    ```
 
-3. Select **VOD to Media Library (mwongj fork)** from that repository and install it. Alternatively, import `vod2mlib-1.21.2.zip` from the [fork distribution releases](https://github.com/mwongj/Dispatcharr-Plugins/releases).
+3. Select **VOD to Media Library (mwongj fork)** from that repository and install it. Alternatively, import `vod2mlib-1.21.3.zip` from the [fork distribution releases](https://github.com/mwongj/Dispatcharr-Plugins/releases).
 4. Enable the plugin, configure reachable paths and the Dispatcharr URL, and click **Save**.
 
 The source repository is [mwongj/VOD2MLIB](https://github.com/mwongj/VOD2MLIB); ZIPs and update manifests are published by [mwongj/Dispatcharr-Plugins](https://github.com/mwongj/Dispatcharr-Plugins). The official catalogue's upstream plugin is a separate distribution. Use **mwongj Plugin Forks** for this fork's updates. The identifier remains `vod2mlib`, so installing the fork over an existing managed installation keeps the same settings and schedule identity; the two distributions are not intended to run as separate plugins.
